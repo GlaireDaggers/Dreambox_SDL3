@@ -11,7 +11,7 @@ A (mostly complete) SDL3 port of the Dreambox fantasy console runtime
 # Changes
 This port saves user data into a new folder compared to the old FNA version.
 
-- On Windows, it will save to `{USERS}\AppData\Roaming\Dreambox\`
+- On Windows, it will save to `%userprofile%\AppData\Roaming\Dreambox\`
 - On Linux, it will save to `~/.local/share/Dreambox/`
 
 The config JSON file format is not compatible with the old FNA version. However, the memory card save file format is identical.
