@@ -77,6 +77,16 @@ public enum VDPWrap
     MIRROR      = 0x8370,
 }
 
+public enum VDPVertexSlotFormat
+{
+    Float1,
+    Float2,
+    Float3,
+    Float4,
+    UNorm4,
+    SNorm4,
+}
+
 public struct Color32
 {
     public byte r;
@@ -104,6 +114,68 @@ public struct Color32
     {
         return new SDL.SDL_FColor() { r = r / 255.0f, g = g / 255.0f, b = b / 255.0f, a = a / 255.0f };
     }
+}
+
+public struct VDPVertexSlot
+{
+    public int offset;
+    public VDPVertexSlotFormat format;
+}
+
+[InlineArray(8)]
+public struct VDPVertexLayout : IEquatable<VDPVertexLayout>
+{
+    public VDPVertexSlot slot0;
+
+    public readonly bool Equals(VDPVertexLayout other)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            if (this[i].offset != other[i].offset || this[i].format != other[i].format)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public override bool Equals([NotNullWhen(true)] object? obj) => obj is VDPVertexLayout other && Equals(other);
+
+    public override readonly int GetHashCode()
+    {
+        var hash = new HashCode();
+
+        for (int i = 0; i < 8; i++)
+        {
+            hash.Add(this[i].offset);
+            hash.Add(this[i].format);
+        }
+
+        return hash.ToHashCode();
+    }
+    
+    public static bool operator ==(VDPVertexLayout left, VDPVertexLayout right)
+    {
+        return left.Equals(right);
+    }
+
+    public static bool operator !=(VDPVertexLayout left, VDPVertexLayout right)
+    {
+        return !(left == right);
+    }
+}
+
+[InlineArray(16)]
+public struct VUCData
+{
+    public Vector4 slot;
+}
+
+[InlineArray(64)]
+public struct VUProgram
+{
+    public uint instr;
 }
 
 public struct Vertex
@@ -330,10 +402,11 @@ class VDP : IDisposable
         public VDPBlendFactor blendFactorDst;
         public VDPWindingOrder winding;
         public bool culling;
-        public bool enableLighting;
         public VdpRenderTexture? target;
+        public VDPVertexLayout vuLayout;
+        public int vuStride;
 
-        public bool Equals(PipelineSettings other)
+        public readonly bool Equals(PipelineSettings other)
         {
             return topology == other.topology &&
                 depthWrite == other.depthWrite &&
@@ -343,13 +416,14 @@ class VDP : IDisposable
                 blendFactorDst == other.blendFactorDst &&
                 winding == other.winding &&
                 culling == other.culling &&
-                enableLighting == other.enableLighting &&
-                target == other.target;
+                target == other.target &&
+                vuLayout == other.vuLayout &&
+                vuStride == other.vuStride;
         }
 
-        public override bool Equals([NotNullWhen(true)] object? obj) => obj is PipelineSettings other && Equals(other);
+        public override readonly bool Equals([NotNullWhen(true)] object? obj) => obj is PipelineSettings other && Equals(other);
 
-        public override int GetHashCode()
+        public override readonly int GetHashCode()
         {
             var hash = new HashCode();
             hash.Add(topology);
@@ -360,8 +434,9 @@ class VDP : IDisposable
             hash.Add(blendFactorDst);
             hash.Add(winding);
             hash.Add(culling);
-            hash.Add(enableLighting);
             hash.Add(target);
+            hash.Add(vuLayout);
+            hash.Add(vuStride);
             return hash.ToHashCode();
         }
     }
@@ -389,6 +464,23 @@ class VDP : IDisposable
         public FFUniform uniforms;
     }
 
+    struct VUDrawCmd
+    {
+        public int bufferOffset;
+        public int bufferLength;
+        public VDPTopology topology;
+        public bool needsNewRenderPass;
+        public Color32? clearColor;
+        public float? clearDepth;
+        public bool needsNewPso;
+        public PipelineSettings psoSettings;
+        public bool needsNewTexture;
+        public SamplerSettings textureSettings;
+        public Texture? texture;
+        public VUCData cdata;
+        public VUProgram? program;
+    }
+
     public int TextureMemoryUsage => _totalTexMem;
 
     private readonly GraphicsDevice _graphicsDevice;
@@ -396,8 +488,7 @@ class VDP : IDisposable
     private readonly Texture _depthTarget;
     private readonly Texture _blankTexture;
 
-    private List<PackedVertex> _frameVertexData;
-    private VertexBuffer<PackedVertex> _geoBuffer;
+    private List<byte> _frameVUData;
 
     private nint _activeCmdBuf = 0;
     private nint _activeRenderPass = 0;
@@ -419,9 +510,7 @@ class VDP : IDisposable
     private bool _needsNewPipeline = false;
     private bool _needsNewTexture = false;
 
-    private byte[] _vcop_mem_data = new byte[65536];
-
-    private Queue<DrawCmd> _drawQueue = new Queue<DrawCmd>();
+    private Queue<VUDrawCmd> _drawQueue = new Queue<VUDrawCmd>();
 
     private PipelineSettings _drawSettings = new PipelineSettings() {
         topology = VDPTopology.TRIANGLE_LIST,
@@ -444,24 +533,22 @@ class VDP : IDisposable
 
     private Shader _blit_vertex;
     private Shader _blit_fragment;
-    private Shader _ff_vertex;
-    private Shader _ff_vertex_lit;
+    private Shader _vu_vertex;
     private Shader _ff_fragment;
 
     private GraphicsPipeline _pso_blit;
-    private ComputePipeline _vcop_interpreter;
 
     private VertexBuffer<BlitVertex> _blitQuad;
 
     private nint _linearSampler;
 
-    private GraphicsBuffer _vcop_workmem;
-    private VertexBuffer<PackedVertex> _vcop_vtxbuffer;
-    private GraphicsBuffer _vcop_drawcmd;
-
-    private FFUniform _activeUniforms;
+    private GraphicsBuffer _vu_program;
+    private GraphicsBuffer _vu_data;
 
     private int _totalVerticesThisFrame = 0;
+
+    private VUCData _vu_cdata;
+    private VUProgram? _vu_program_data;
 
     public VDP(GraphicsDevice graphicsDevice)
     {
@@ -488,24 +575,12 @@ class VDP : IDisposable
 
         _blankTexture = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1, 1, 1, SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
 
-        var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(graphicsDevice.handle);
-        var copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
-        _blankTexture.SetData(copyPass, cmdBuf, [ new Color32(255, 255, 255) ], 0, 0, 0, 0, 0, 1, 1, 1, false);
-        SDL.SDL_EndGPUCopyPass(copyPass);
-        SDL.SDL_SubmitGPUCommandBuffer(cmdBuf);
-
-        _frameVertexData = new List<PackedVertex>(1024 * 3);
-        _activeUniforms = new FFUniform() {
-            transform = Matrix4x4.Identity,
-            llight = Matrix4x4.Identity,
-            lcol = Matrix4x4.Identity
-        };
+        _frameVUData = new List<byte>(1024 * 3 * Unsafe.SizeOf<PackedVertex>());
 
         // load shaders
         _blit_vertex = LoadShader(_graphicsDevice, "content/shaders/blit.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 0);
         _blit_fragment = LoadShader(_graphicsDevice, "content/shaders/blit.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
-        _ff_vertex = LoadShader(_graphicsDevice, "content/shaders/fixedfunction.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
-        _ff_vertex_lit = LoadShader(_graphicsDevice, "content/shaders/fixedfunction_lit.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 1);
+        _vu_vertex = LoadShader(_graphicsDevice, "content/shaders/vu.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
         _ff_fragment = LoadShader(_graphicsDevice, "content/shaders/fixedfunction.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
 
         // create graphics pipelines
@@ -537,30 +612,16 @@ class VDP : IDisposable
                 compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
             });
 
-        // compute pipelines
-        _vcop_interpreter = new ComputePipeline(graphicsDevice, File.ReadAllBytes("content/shaders/vcop.spv"), "main", 0, 0, 0, 0, 3, 0, 1, 1, 1);
-
         // vertex buffers
         _blitQuad = new VertexBuffer<BlitVertex>(graphicsDevice, 6);
         SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _blitQuad.handle, nameof(_blitQuad));
 
-        _geoBuffer = new VertexBuffer<PackedVertex>(graphicsDevice, 1024 * 3);
-        SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _geoBuffer.handle, nameof(_geoBuffer));
+        // enough space to fit 64 VU instructions (32 bits per instruction)
+        _vu_program = new GraphicsBuffer(graphicsDevice, 256, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+
+        // note: will be resized as needed
+        _vu_data = new GraphicsBuffer(graphicsDevice, 1024 * 3 * Unsafe.SizeOf<PackedVertex>(), SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX);
         
-        // 64KiB available to VCOP
-        _vcop_workmem = new GraphicsBuffer(graphicsDevice, 65536,
-            SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
-        SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _vcop_workmem.handle, nameof(_vcop_workmem));
-
-        // 64KiB, same as work mem (note: vertex is 32 bytes)
-        _vcop_vtxbuffer = new VertexBuffer<PackedVertex>(graphicsDevice, 2048);
-        SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _vcop_vtxbuffer.handle, nameof(_vcop_vtxbuffer));
-
-        // 16 bytes to fit an indirect call struct
-        _vcop_drawcmd = new GraphicsBuffer(graphicsDevice, 16,
-            SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_INDIRECT);
-        SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _vcop_drawcmd.handle, nameof(_vcop_drawcmd));
-
         // samplers
         _linearSampler = SDL.SDL_CreateGPUSampler(graphicsDevice.handle, new SDL.SDL_GPUSamplerCreateInfo() {
             min_filter = SDL.SDL_GPUFilter.SDL_GPU_FILTER_LINEAR,
@@ -568,6 +629,57 @@ class VDP : IDisposable
             address_mode_u = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
             address_mode_v = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         });
+
+        // default VU settings for backwards compat
+        _drawSettings.vuStride = 32;
+        _drawSettings.vuLayout[0] = new VDPVertexSlot() {
+            offset = 0,
+            format = VDPVertexSlotFormat.Float4
+        };
+        _drawSettings.vuLayout[1] = new VDPVertexSlot() {
+            offset = 16,
+            format = VDPVertexSlotFormat.Float2
+        };
+        _drawSettings.vuLayout[2] = new VDPVertexSlot() {
+            offset = 24,
+            format = VDPVertexSlotFormat.UNorm4
+        };
+        _drawSettings.vuLayout[3] = new VDPVertexSlot() {
+            offset = 28,
+            format = VDPVertexSlotFormat.UNorm4
+        };
+
+        /* default VU program: simply copies input vertices to output
+            ld r0 0     # load input slot 0 into r0
+            ld r1 1     # load input slot 1 into r1
+            ld r2 2     # load input slot 2 into r2
+            ld r3 3     # load input slot 3 into r3
+            st pos r0   # store r0 to output position slot
+            st tex r1   # store r1 to output texcoord slot
+            st col r2   # store r2 to output color slot
+            st ocol r3  # store r3 to output ocolor slot
+            end
+        */
+        Span<uint> defaultVuProg = [
+            EncodeVUInstr(0, 0, 0),
+            EncodeVUInstr(0, 1, 1),
+            EncodeVUInstr(0, 2, 2),
+            EncodeVUInstr(0, 3, 3),
+            EncodeVUInstr(1, 0, 0),
+            EncodeVUInstr(1, 1, 1),
+            EncodeVUInstr(1, 2, 2),
+            EncodeVUInstr(1, 3, 3),
+            EncodeVUInstr(15, 0, 0),
+        ];
+
+        var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(graphicsDevice.handle);
+        var copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
+        {
+            _blankTexture.SetData(copyPass, cmdBuf, [ new Color32(255, 255, 255) ], 0, 0, 0, 0, 0, 1, 1, 1, false);
+            _vu_program.SetData(copyPass, defaultVuProg, 0, false);
+        }
+        SDL.SDL_EndGPUCopyPass(copyPass);
+        SDL.SDL_SubmitGPUCommandBuffer(cmdBuf);
     }
 
     private Shader LoadShader(GraphicsDevice device, string path, SDL.SDL_GPUShaderStage stage,
@@ -580,24 +692,32 @@ class VDP : IDisposable
 
     private void FlushDrawQueue()
     {
-        if (_geoBuffer.vertexCount < _frameVertexData.Count)
+        if (_vu_data.byteLength < _frameVUData.Count)
         {
-            _geoBuffer.Dispose();
-            _geoBuffer = new VertexBuffer<PackedVertex>(_graphicsDevice, _frameVertexData.Capacity);
+            _vu_data.Dispose();
+            _vu_data = new GraphicsBuffer(_graphicsDevice, _frameVUData.Capacity, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX);
         }
 
         var copyPass = SDL.SDL_BeginGPUCopyPass(_activeCmdBuf);
-        _geoBuffer.SetData(copyPass, CollectionsMarshal.AsSpan(_frameVertexData), 0, true);
+        _vu_data.SetData(copyPass, CollectionsMarshal.AsSpan(_frameVUData), 0, true);
         SDL.SDL_EndGPUCopyPass(copyPass);
 
         while (_drawQueue.TryDequeue(out var cmd))
         {
-            // note: lighting enable doubles the cost of drawing
-            if (cmd.psoSettings.enableLighting) {
-                _totalVerticesThisFrame += cmd.vtxLength * 2;
-            }
-            else {
-                _totalVerticesThisFrame += cmd.vtxLength;
+            // TODO: compute "cycle cost" based on length of VU program
+            int vtxCount = cmd.bufferLength / cmd.psoSettings.vuStride;
+            _totalVerticesThisFrame += vtxCount;
+
+            // this draw requires a new vertex program to be copied into the buffer
+            if (cmd.program != null)
+            {
+                FlushRenderPass();
+                copyPass = SDL.SDL_BeginGPUCopyPass(_activeCmdBuf);
+
+                var prg = cmd.program.Value;
+                _vu_program.SetData(copyPass, prg[0..64], 0, true);
+
+                SDL.SDL_EndGPUCopyPass(copyPass);
             }
 
             if (cmd.needsNewRenderPass)
@@ -606,15 +726,7 @@ class VDP : IDisposable
                 _clearColor = cmd.clearColor;
                 _clearDepth = cmd.clearDepth;
             }
-            
             CheckRenderPass();
-
-            SDL.SDL_BindGPUVertexBuffers(_activeRenderPass, 0, [
-                new SDL.SDL_GPUBufferBinding() {
-                    buffer = _geoBuffer.handle,
-                    offset = 0
-                }
-            ], 1);
 
             if (cmd.needsNewPso)
             {
@@ -624,6 +736,17 @@ class VDP : IDisposable
                 var pso = GetOrCreatePipeline(pipelineSettings);
                 SDL.SDL_BindGPUGraphicsPipeline(_activeRenderPass, pso.handle);
             }
+
+            SDL.SDL_BindGPUVertexBuffers(_activeRenderPass, 0, [
+                new SDL.SDL_GPUBufferBinding() {
+                    buffer = _vu_data.handle,
+                    offset = (uint)cmd.bufferOffset
+                }
+            ], 1);
+
+            SDL.SDL_BindGPUVertexStorageBuffers(_activeRenderPass, 0, [
+                _vu_program.handle
+            ], 1);
 
             if (cmd.needsNewTexture)
             {
@@ -637,11 +760,11 @@ class VDP : IDisposable
 
             unsafe
             {
-                FFUniform* ptr = &cmd.uniforms;
-                SDL.SDL_PushGPUVertexUniformData(_activeCmdBuf, 0, (nint)ptr, (uint)Unsafe.SizeOf<FFUniform>());
+                VUCData* cdata_ptr = &cmd.cdata;
+                SDL.SDL_PushGPUVertexUniformData(_activeCmdBuf, 0, (nint)cdata_ptr, (uint)Unsafe.SizeOf<VUCData>());
             }
 
-            SDL.SDL_DrawGPUPrimitives(_activeRenderPass, (uint)cmd.vtxLength, 1, (uint)cmd.vtxOffset, 0);
+            SDL.SDL_DrawGPUPrimitives(_activeRenderPass, (uint)vtxCount, 1, 0, 0);
         }
     }
 
@@ -744,6 +867,27 @@ class VDP : IDisposable
         return sampler;
     }
 
+    private SDL.SDL_GPUVertexAttribute ConvertLayoutSlot(uint loc, in VDPVertexSlot slot)
+    {
+        var fmt = slot.format switch
+        {
+            VDPVertexSlotFormat.Float1 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
+            VDPVertexSlotFormat.Float2 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+            VDPVertexSlotFormat.Float3 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+            VDPVertexSlotFormat.Float4 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
+            VDPVertexSlotFormat.UNorm4 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+            VDPVertexSlotFormat.SNorm4 => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_BYTE4_NORM,
+            _ => SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_INVALID,// invalid format
+        };
+
+        return new SDL.SDL_GPUVertexAttribute() {
+            location = loc,
+            buffer_slot = 0,
+            offset = (uint)slot.offset,
+            format = fmt,
+        };
+    }
+
     private GraphicsPipeline GetOrCreatePipeline(PipelineSettings settings)
     {
         if (_pipelineCache.TryGetValue(settings, out var pso))
@@ -751,8 +895,27 @@ class VDP : IDisposable
             return pso;
         }
 
+        // create layout from vu settings
+        var vtxDesc = new SDL.SDL_GPUVertexBufferDescription() {
+            slot = 0,
+            pitch = (uint)settings.vuStride,
+            input_rate = SDL.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX,
+            instance_step_rate = 0
+        };
+
+        Span<SDL.SDL_GPUVertexAttribute> vtxAttr = [
+            ConvertLayoutSlot(0, settings.vuLayout[0]),
+            ConvertLayoutSlot(1, settings.vuLayout[1]),
+            ConvertLayoutSlot(2, settings.vuLayout[2]),
+            ConvertLayoutSlot(3, settings.vuLayout[3]),
+            ConvertLayoutSlot(4, settings.vuLayout[4]),
+            ConvertLayoutSlot(5, settings.vuLayout[5]),
+            ConvertLayoutSlot(6, settings.vuLayout[6]),
+            ConvertLayoutSlot(7, settings.vuLayout[7]),
+        ];
+
         // create new pipeline
-        pso = GraphicsPipeline.Create<PackedVertex>(_graphicsDevice,
+        pso = new GraphicsPipeline(_graphicsDevice,
             [new () {
                 format = settings.target?.texture.format ?? _screenTarget.format,
                 blend_state = new ()
@@ -766,7 +929,8 @@ class VDP : IDisposable
                     enable_blend = true,
                     enable_color_write_mask = false,
                 }
-            }], settings.target?.depthTexture.format ?? _depthTarget.format, true, settings.enableLighting ? _ff_vertex_lit : _ff_vertex, _ff_fragment,
+            }], settings.target?.depthTexture.format ?? _depthTarget.format, true, _vu_vertex, _ff_fragment,
+            vtxDesc, vtxAttr,
             TOPOLOGY_TO_SDL[settings.topology],
             new () {
                 fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
@@ -830,7 +994,7 @@ class VDP : IDisposable
         _needsNewPipeline = true;
         _needsNewRenderPass = true;
         _needsNewTexture = true;
-        _frameVertexData.Clear();
+        _frameVUData.Clear();
         _totalVerticesThisFrame = 0;
     }
 
@@ -881,12 +1045,6 @@ class VDP : IDisposable
     {
         _needsNewPipeline = true;
         _drawSettings.culling = enabled;
-    }
-
-    public void SetLighting(bool enabled)
-    {
-        _needsNewPipeline = true;
-        _drawSettings.enableLighting = enabled;
     }
 
     public void SetSampleParams(VDPFilter filter, VDPWrap wrapU, VDPWrap wrapV)
@@ -1153,28 +1311,43 @@ class VDP : IDisposable
         SDL.SDL_SetGPUScissor(_activeRenderPass, _activeScissor);
     }
 
-    public void LoadTransform(Matrix4x4 transform)
+    public void SetVUCData(int offset, Vector4 data)
     {
-        _activeUniforms.transform = transform;
+        _vu_cdata[offset] = data;
     }
 
-    public void LoadLightTransforms(Matrix4x4 llight, Matrix4x4 lcol)
+    public void SetVULayout(int slot, int offset, VDPVertexSlotFormat format)
     {
-        _activeUniforms.llight = llight;
-        _activeUniforms.lcol = lcol;
+        _needsNewPipeline = true;
+        _drawSettings.vuLayout[slot].offset = offset;
+        _drawSettings.vuLayout[slot].format = format;
     }
 
-    public void DrawGeometry(VDPTopology topology, Span<PackedVertex> vertexData)
+    public void SetVUStride(int stride)
     {
-        int bufferOffset = _frameVertexData.Count;
-        int bufferLen = vertexData.Length;
+        _needsNewPipeline = true;
+        _drawSettings.vuStride = stride;
+    }
 
-        _frameVertexData.AddRange(vertexData);
+    public void UploadVUProgram(Span<uint> program)
+    {
+        var prg = new VUProgram();
+        program.CopyTo(prg[0..64]);
+
+        _vu_program_data = prg;
+    }
+
+    public void SubmitVU(VDPTopology topology, Span<byte> data)
+    {
+        int bufferOffset = _frameVUData.Count;
+        int bufferLen = data.Length;
+
+        _frameVUData.AddRange(data);
 
         // queue draw command
-        _drawQueue.Enqueue(new DrawCmd() {
-            vtxOffset = bufferOffset,
-            vtxLength = bufferLen,
+        _drawQueue.Enqueue(new VUDrawCmd() {
+            bufferOffset = bufferOffset,
+            bufferLength = bufferLen,
             topology = topology,
             needsNewRenderPass = _needsNewRenderPass,
             clearColor = _clearColor,
@@ -1184,7 +1357,8 @@ class VDP : IDisposable
             needsNewTexture = _needsNewTexture,
             textureSettings = _sampleSettings,
             texture = _activeTexture,
-            uniforms = _activeUniforms,
+            cdata = _vu_cdata,
+            program = _vu_program_data,
         });
 
         _needsNewPipeline = false;
@@ -1192,93 +1366,15 @@ class VDP : IDisposable
         _needsNewRenderPass = false;
         _clearColor = null;
         _clearDepth = null;
+        _vu_program_data = null;
     }
-
-    // TODO: VCOP feature needs some SERIOUS reworking to get acceptable perf
-
-    /*public void UploadVCOPMemory<T>(int offset, Span<T> data)
-        where T : unmanaged
-    {
-        unsafe
-        {
-            fixed (byte* dstPtr = &_vcop_mem_data[offset])
-            fixed (T* srcPtr = data)
-            {
-                Unsafe.CopyBlock(dstPtr, srcPtr, (uint)(Unsafe.SizeOf<T>() * data.Length));
-            }
-        }
-    }
-
-    public void InvokeVCOP(VDPTopology topology)
-    {
-        CheckCopyPass();
-        _vcop_workmem.SetData(_activeCopyPass, _vcop_mem_data.AsSpan(), 0, true);
-        FlushCopyPass();
-
-        // begin a new compute pass
-        nint computePass = SDL.SDL_BeginGPUComputePass(_activeCmdBuf, [], 0, [
-            new SDL.SDL_GPUStorageBufferReadWriteBinding()
-            {
-                buffer = _vcop_workmem.handle,
-                cycle = false
-            },
-            new SDL.SDL_GPUStorageBufferReadWriteBinding()
-            {
-                buffer = _vcop_drawcmd.handle,
-                cycle = true
-            },
-            new SDL.SDL_GPUStorageBufferReadWriteBinding()
-            {
-                buffer = _vcop_vtxbuffer.handle,
-                cycle = true
-            }
-        ], 3);
-
-        SDL.SDL_BindGPUComputePipeline(computePass, _vcop_interpreter.handle);
-        SDL.SDL_DispatchGPUCompute(computePass, 1, 1, 1);
-        SDL.SDL_EndGPUComputePass(computePass);
-
-        // submit indirect draw
-        CheckRenderPass();
-
-        if (_needsNewPipeline)
-        {
-            var pipelineSettings = _drawSettings;
-            pipelineSettings.topology = topology;
-
-            var pso = GetOrCreatePipeline(pipelineSettings);
-            SDL.SDL_BindGPUGraphicsPipeline(_activeRenderPass, pso.handle);
-
-            _needsNewPipeline = false;
-        }
-
-        if (_needsNewTexture)
-        {
-            SDL.SDL_BindGPUFragmentSamplers(_activeRenderPass, 0, [
-                new SDL.SDL_GPUTextureSamplerBinding() {
-                    texture = _activeTexture?.handle ?? _blankTexture.handle,
-                    sampler = GetOrCreateSampler(_sampleSettings)
-                }
-            ], 1);
-
-            _needsNewTexture = false;
-        }
-
-        SDL.SDL_BindGPUVertexBuffers(_activeRenderPass, 0, [
-            new SDL.SDL_GPUBufferBinding() {
-                buffer = _vcop_vtxbuffer.handle,
-                offset = 0
-            }
-        ], 1);
-
-        SDL.SDL_DrawGPUPrimitivesIndirect(_activeRenderPass, _vcop_drawcmd.handle, 0, 1);
-    }*/
 
     public void EndFrame(out int numSkipFrames)
     {
         FlushDrawQueue();
         FlushRenderPass();
 
+        // TODO: use vertex cycles instead of number of vertices
         numSkipFrames = _totalVerticesThisFrame / VERTICES_PER_FRAME;
     }
 
@@ -1328,12 +1424,9 @@ class VDP : IDisposable
 
         _blitQuad.Dispose();
 
-        _geoBuffer.Dispose();
-        _vcop_workmem.Dispose();
-        _vcop_vtxbuffer.Dispose();
-        _vcop_drawcmd.Dispose();
+        _vu_data.Dispose();
+        _vu_program.Dispose();
 
-        _vcop_interpreter.Dispose();
         _pso_blit.Dispose();
         _screenTarget.Dispose();
         _depthTarget.Dispose();
@@ -1341,9 +1434,8 @@ class VDP : IDisposable
 
         _blit_vertex.Dispose();
         _blit_fragment.Dispose();
-        _ff_vertex.Dispose();
+        _vu_vertex.Dispose();
         _ff_fragment.Dispose();
-        _ff_vertex_lit.Dispose();
     }
     
     private static int getTotalLevelCount(int width, int height)
@@ -1425,5 +1517,18 @@ class VDP : IDisposable
     private static int calcDepthTextureLevelSize(int width, int height)
     {
         return width * height * 4;
+    }
+
+    private static uint EncodeVUInstr(ushort opcode, ushort d, ushort s, ushort sx = 0, ushort sy = 0, ushort sz = 0, ushort sw = 0, ushort m = 0)
+    {
+        return (uint)(
+            (opcode & 0xF) |
+            ((d & 0xF) << 4) |
+            ((s & 0xF) << 8) |
+            ((sx & 3) << 12) |
+            ((sy & 3) << 14) |
+            ((sz & 3) << 16) |
+            ((sw & 3) << 18) |
+            ((m & 0xF) << 20));
     }
 }

@@ -1,6 +1,7 @@
 namespace DreamboxVM.VM;
 
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using SDL3;
 using Wasmtime;
 
@@ -49,6 +50,7 @@ class Runtime
     private string _tableName;
 
     private PackedVertex[] _tmpPackedVertex = new PackedVertex[1024];
+    private byte[] _tmpPackedVertexBufferData = new byte[1024 * 32];
 
     private DreamboxConfig _config;
 
@@ -125,9 +127,11 @@ class Runtime
         _linker.DefineFunction<int, int, int, int>("env", "vdp_viewport", vdp_viewport);
         _linker.DefineFunction<float, int, int, int, int, int>("env", "vdp_submitDepthQuery", vdp_submitDepthQuery);
         _linker.DefineFunction("env", "vdp_getDepthQueryResult", vdp_getDepthQueryResult);
-        _linker.DefineFunction<int>("env", "vdp_loadTransform", vdp_loadTransform);
-        _linker.DefineFunction<int>("env", "vdp_setLighting", vdp_setLighting);
-        _linker.DefineFunction<int, int>("env", "vdp_loadLightTransforms", vdp_loadLightTransforms);
+        _linker.DefineFunction<int, int>("env", "vdp_setVUCData", vdp_setVUCData);
+        _linker.DefineFunction<int, int>("env", "vdp_uploadVUProgram", vdp_uploadVUProgram);
+        _linker.DefineFunction<int, int, int>("env", "vdp_setVULayout", vdp_setVULayout);
+        _linker.DefineFunction<int>("env", "vdp_setVUStride", vdp_setVUStride);
+        _linker.DefineFunction<int, int, int>("env", "vdp_submitVU", vdp_submitVU);
         _linker.DefineFunction<int>("env", "mat4_loadSIMD", mat_load);
         _linker.DefineFunction<int>("env", "mat4_storeSIMD", mat_store);
         _linker.DefineFunction<int>("env", "mat4_mulSIMD", mat_mul);
@@ -938,12 +942,16 @@ class Runtime
     {
         var vtxSpan = memory.GetSpan<Vertex>(vertexDataPtr).Slice(first, count);
         int newLen = _tmpPackedVertex.Length;
+        
         while (newLen < vtxSpan.Length) {
             newLen *= 2;
         }
+        
         if (_tmpPackedVertex.Length < newLen) {
             _tmpPackedVertex = new PackedVertex[newLen];
+            _tmpPackedVertexBufferData = new byte[newLen * Unsafe.SizeOf<PackedVertex>()];
         }
+        
         for (int i = 0; i < vtxSpan.Length; i++)
         {
             var vtx = vtxSpan[i];
@@ -955,13 +963,25 @@ class Runtime
                 ocolor = new Color32(vtx.ocolor),
             };
         }
-        _vdp.DrawGeometry((VDPTopology)topology, _tmpPackedVertex.AsSpan()[..count]);
+        
+        unsafe
+        {
+            fixed (void* src = _tmpPackedVertex)
+            fixed (void* dst = _tmpPackedVertexBufferData)
+            {
+                Unsafe.CopyBlock(dst, src, (uint)(vtxSpan.Length * Unsafe.SizeOf<PackedVertex>()));
+            }
+        }
+
+        int byteCount = vtxSpan.Length * Unsafe.SizeOf<PackedVertex>();
+
+        _vdp.SubmitVU((VDPTopology)topology, _tmpPackedVertexBufferData.AsSpan()[..byteCount]);
     }
 
     private void vdp_drawGeometryPacked(int topology, int first, int count, int vertexDataPtr)
     {
-        var vtxSpan = memory.GetSpan<PackedVertex>(vertexDataPtr).Slice(first, count);
-        _vdp.DrawGeometry((VDPTopology)topology, vtxSpan);
+        var vtxSpan = memory.GetSpan<byte>(vertexDataPtr).Slice(first, count * Unsafe.SizeOf<PackedVertex>());
+        _vdp.SubmitVU((VDPTopology)topology, vtxSpan);
     }
 
     private void vdp_setVsyncHandler(int handlerPtr)
@@ -1069,22 +1089,32 @@ class Runtime
         return _vdp.GetDepthQueryResult();
     }
 
-    private void vdp_loadTransform(int transformPtr)
+    private void vdp_setVUCData(int offset, int vecPtr)
     {
-        var transform = GetSpan<Matrix4x4>(transformPtr, 1);
-        _vdp.LoadTransform(transform[0]);
+        var data = GetSpan<Vector4>(vecPtr, 1);
+        _vdp.SetVUCData(offset, data[0]);
     }
 
-    private void vdp_setLighting(int enabled)
+    private void vdp_setVULayout(int slot, int offset, int format)
     {
-        _vdp.SetLighting(enabled != 0);
+        _vdp.SetVULayout(slot, offset, (VDPVertexSlotFormat)format);
     }
 
-    private void vdp_loadLightTransforms(int llightPtr, int lcolPtr)
+    private void vdp_setVUStride(int stride)
     {
-        var llight = GetSpan<Matrix4x4>(llightPtr, 1);
-        var lcol = GetSpan<Matrix4x4>(lcolPtr, 1);
-        _vdp.LoadLightTransforms(llight[0], lcol[0]);
+        _vdp.SetVUStride(stride);
+    }
+
+    private void vdp_uploadVUProgram(int programPtr, int programLength)
+    {
+        var data = GetSpan<uint>(programPtr, programLength / 4);
+        _vdp.UploadVUProgram(data);
+    }
+
+    private void vdp_submitVU(int topology, int dataPtr, int dataLength)
+    {
+        var data = GetSpan<byte>(dataPtr, dataLength);
+        _vdp.SubmitVU((VDPTopology)topology, data);
     }
 
     private int audio_initSynth(int dataPtr, int dataLen)
