@@ -127,7 +127,7 @@ public class AudioVoice
 
     public int slot;
 
-    public float[]? sampleData;
+    public SampleBuffer? sampleData;
     public bool reverb = false;
     public bool enabled = false;
     public int samplerate = 44100;
@@ -186,7 +186,7 @@ public class AudioVoice
     {
         if (sampleData == null || !enabled) return;
 
-        int endPos = sampleData.Length;
+        int endPos = sampleData.data.Count;
 
         if (loopEnabled && loopEnd > 0)
         {
@@ -235,13 +235,13 @@ public class AudioVoice
 
             int idx0 = (int)samplePos;
             int idx1 = idx0 + 1;
-            if (idx1 >= sampleData.Length) idx1 = loopEnabled ? loopStart : idx0;
+            if (idx1 >= sampleData.data.Count) idx1 = loopEnabled ? loopStart : idx0;
 
             float ratio = (float)(samplePos - idx0);
 
             // linear 2-tap sampling
-            float s0 = sampleData[idx0];
-            float s1 = sampleData[idx1];
+            float s0 = sampleData.data[idx0];
+            float s1 = sampleData.data[idx1];
             float s = s0 + ((s1 - s0) * ratio);
 
             destBuffer[i] += s * gainL * fade;
@@ -268,11 +268,17 @@ public class AudioVoice
     }
 }
 
+public class SampleBuffer
+{
+    public List<float> data = [];
+    public int refCount = 0;
+}
+
 public class AudioSystem : IDisposable
 {
     private struct SampleData
     {
-        public float[] pcmData;
+        public SampleBuffer pcmData;
         public int srcMemorySize;
     }
 
@@ -326,6 +332,9 @@ public class AudioSystem : IDisposable
     private GCHandle _handle;
     private nint _audioStream;
 
+    private Queue<SampleBuffer> _sampleBufferPool = new Queue<SampleBuffer>();
+    private List<SampleBuffer> _usedBuffers = new List<SampleBuffer>();
+
     public AudioSystem()
     {
         _handle = GCHandle.Alloc(this);
@@ -375,7 +384,7 @@ public class AudioSystem : IDisposable
                 WaveFormat fmt = WaveFormat.CreateIeeeFloatWaveFormat(44100, 1);
                 using (WaveFileWriter writer = new WaveFileWriter("_dump_sample_" + i + ".wav", fmt))
                 {
-                    writer.WriteSamples(sampledata.pcmData, 0, sampledata.pcmData.Length);
+                    writer.WriteSamples(sampledata.pcmData.data.ToArray(), 0, sampledata.pcmData.data.Count);
                 }
             }
         }
@@ -476,17 +485,28 @@ public class AudioSystem : IDisposable
             return -1;
         }
 
+        // each chunk starts with a 4-byte preamble, and the remaining bytes each encode 2 samples
         int blockCount = data.Length / chunkLength;
         int bytesPerChunk = chunkLength - 4;
         int samplesPerChunk = bytesPerChunk * 2;
-        float[] pcm_f32 = new float[blockCount * samplesPerChunk]; // each chunk starts with a 4-byte preamble, and the remaining bytes each encode 2 samples
+        
+        SampleBuffer pcm_f32 = AllocSampleBuffer();
+        pcm_f32.refCount = 1;
+        pcm_f32.data.Clear();
+        pcm_f32.data.EnsureCapacity(blockCount * samplesPerChunk);
+
+        _usedBuffers.Add(pcm_f32);
+
+        for (int i = 0; i < (blockCount * samplesPerChunk); i++) {
+            pcm_f32.data.Add(0);
+        }
 
         for (int i = 0; i < blockCount; i++)
         {
             Span<byte> block = data.Slice(i * chunkLength, chunkLength);
             ushort initPredictor = (ushort)(block[0] | (block[1] << 8));
             byte initStepIndex = block[2];
-            DecodeADPCM((short)initPredictor, initStepIndex, block.Slice(4), pcm_f32.AsSpan().Slice(i * samplesPerChunk, samplesPerChunk));
+            DecodeADPCM((short)initPredictor, initStepIndex, block.Slice(4), CollectionsMarshal.AsSpan(pcm_f32.data).Slice(i * samplesPerChunk, samplesPerChunk));
         }
 
         _totalAudioMem += data.Length;
@@ -519,30 +539,35 @@ public class AudioSystem : IDisposable
             return -1;
         }
 
-        float[] pcm_f32;
+        SampleBuffer pcm_f32 = AllocSampleBuffer();
+        pcm_f32.refCount = 1;
+        pcm_f32.data.Clear();
+
+        _usedBuffers.Add(pcm_f32);
 
         switch (format)
         {
             case AudioFormat.PCM_S8:
                 {
-                    pcm_f32 = new float[data.Length];
+                    pcm_f32.data.EnsureCapacity(data.Length);
 
                     for (int i = 0; i < data.Length; i++)
                     {
-                        pcm_f32[i] = ((sbyte)data[i]) / 128.0f;
+                        pcm_f32.data.Add(((sbyte)data[i]) / 128.0f);
                     }
                     break;
                 }
             case AudioFormat.PCM_S16:
                 {
-                    pcm_f32 = new float[data.Length / 2];
+                    pcm_f32.data.EnsureCapacity(data.Length / 2);
 
                     fixed (void* srcptr = data)
                     {
                         short* srcptr_s = (short*)srcptr;
-                        for (int i = 0; i < pcm_f32.Length; i++)
+                        int len = data.Length / 2;
+                        for (int i = 0; i < len; i++)
                         {
-                            pcm_f32[i] = srcptr_s[i] / 32768.0f;
+                            pcm_f32.data.Add(srcptr_s[i] / 32768.0f);
                         }
                     }
                     break;
@@ -581,6 +606,11 @@ public class AudioSystem : IDisposable
         {
             Console.WriteLine("Tried to free invalid audio sample handle");
             return;
+        }
+
+        if (_audioSampleData[handle]?.pcmData is SampleBuffer sampleBuffer)
+        {
+            sampleBuffer.refCount -= 1;
         }
 
         _totalAudioMem -= _audioSampleData[handle]?.srcMemorySize ?? 0;
@@ -627,6 +657,20 @@ public class AudioSystem : IDisposable
             value = new AudioParamEventValue { fvalue = value },
             time = time
         });
+    }
+
+    private SampleBuffer AllocSampleBuffer()
+    {
+        if (_sampleBufferPool.Count > 0) {
+            return _sampleBufferPool.Dequeue();
+        }
+
+        return new SampleBuffer();
+    }
+
+    private void ReturnSampleBuffer(SampleBuffer buffer)
+    {
+        _sampleBufferPool.Enqueue(buffer);
     }
 
     private void DecodeADPCM(short initPredictor, byte initStepIndex, Span<byte> src, Span<float> dst)
@@ -763,7 +807,17 @@ public class AudioSystem : IDisposable
                         }
                         else
                         {
+                            if (nextEvent.target.sampleData is SampleBuffer prevBuff)
+                            {
+                                prevBuff.refCount--;
+                            }
+
                             nextEvent.target.sampleData = _audioSampleData[nextEvent.value.ivalue]?.pcmData;
+                            
+                            if (nextEvent.target.sampleData is SampleBuffer nextBuff)
+                            {
+                                nextBuff.refCount++;
+                            }
                         }
                         break;
                     case AudioVoiceParameter.Samplerate:
@@ -838,6 +892,16 @@ public class AudioSystem : IDisposable
         }
 
         _audioTime += audioBufferDuration;
+
+        // return any sample buffers which are no longer referenced to the pool
+        for (int i = _usedBuffers.Count - 1; i >= 0; i--)
+        {
+            if (_usedBuffers[i].refCount == 0)
+            {
+                ReturnSampleBuffer(_usedBuffers[i]);
+                _usedBuffers.RemoveAt(i);
+            }
+        }
     }
 
     private unsafe void MixVoices(Span<float> targetReverbBuffer, Span<float> targetDryBuffer)

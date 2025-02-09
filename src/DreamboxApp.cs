@@ -110,7 +110,7 @@ class DreamboxApp
         // create graphics device
         _graphicsDevice = new GraphicsDevice(_window);
 
-        SDL.SDL_SetGPUAllowedFramesInFlight(_graphicsDevice.handle, 1);
+        SDL.SDL_SetGPUAllowedFramesInFlight(_graphicsDevice.handle, 2);
 
         // create ImGui renderer
         _imGuiRenderer = new ImGuiRenderer(_graphicsDevice, _graphicsDevice.swapchainFormat);

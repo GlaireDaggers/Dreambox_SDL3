@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using DreamboxVM.Graphics;
 using SDL3;
 
@@ -85,6 +86,16 @@ public enum VDPVertexSlotFormat
     Float4,
     UNorm4,
     SNorm4,
+}
+
+public enum VDPTexCombine
+{
+    None,
+    Mul,
+    Add,
+    Sub,
+    Mix,
+    Dot3,
 }
 
 public struct Color32
@@ -441,27 +452,13 @@ class VDP : IDisposable
         }
     }
 
-    struct FFUniform
+    struct FFParams
     {
-        public Matrix4x4 transform;
-        public Matrix4x4 llight;
-        public Matrix4x4 lcol;
-    }
+        public uint texCombine;
+        public uint vtxCombine;
 
-    struct DrawCmd
-    {
-        public int vtxOffset;
-        public int vtxLength;
-        public VDPTopology topology;
-        public bool needsNewRenderPass;
-        public Color32? clearColor;
-        public float? clearDepth;
-        public bool needsNewPso;
-        public PipelineSettings psoSettings;
-        public bool needsNewTexture;
-        public SamplerSettings textureSettings;
-        public Texture? texture;
-        public FFUniform uniforms;
+        private uint _pad0;
+        private uint _pad1;
     }
 
     struct VUDrawCmd
@@ -475,8 +472,11 @@ class VDP : IDisposable
         public bool needsNewPso;
         public PipelineSettings psoSettings;
         public bool needsNewTexture;
-        public SamplerSettings textureSettings;
-        public Texture? texture;
+        public SamplerSettings sampleTU0;
+        public SamplerSettings sampleTU1;
+        public Texture? tu0;
+        public Texture? tu1;
+        public FFParams ffParams;
         public VUCData cdata;
         public VUProgram? program;
     }
@@ -523,13 +523,23 @@ class VDP : IDisposable
         culling = false,
     };
 
-    private SamplerSettings _sampleSettings = new SamplerSettings() {
+    private SamplerSettings _sampleTU0 = new SamplerSettings() {
         filter = VDPFilter.LINEAR,
         wrapU = VDPWrap.REPEAT,
         wrapV = VDPWrap.REPEAT,
     };
 
-    private Texture? _activeTexture = null;
+    private SamplerSettings _sampleTU1 = new SamplerSettings() {
+        filter = VDPFilter.LINEAR,
+        wrapU = VDPWrap.REPEAT,
+        wrapV = VDPWrap.REPEAT,
+    };
+
+    private Texture? _activeTU0 = null;
+    private Texture? _activeTU1 = null;
+
+    private VDPTexCombine _texCombine = VDPTexCombine.Mul;
+    private VDPTexCombine _vtxCombine = VDPTexCombine.Mul;
 
     private Shader _blit_vertex;
     private Shader _blit_fragment;
@@ -581,7 +591,7 @@ class VDP : IDisposable
         _blit_vertex = LoadShader(_graphicsDevice, "content/shaders/blit.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 0);
         _blit_fragment = LoadShader(_graphicsDevice, "content/shaders/blit.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
         _vu_vertex = LoadShader(_graphicsDevice, "content/shaders/vu.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-        _ff_fragment = LoadShader(_graphicsDevice, "content/shaders/fixedfunction.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
+        _ff_fragment = LoadShader(_graphicsDevice, "content/shaders/fixedfunction.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
 
         // create graphics pipelines
         _pso_blit = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
@@ -650,14 +660,15 @@ class VDP : IDisposable
         };
 
         /* default VU program: simply copies input vertices to output
-            ld r0 0     # load input slot 0 into r0
-            ld r1 1     # load input slot 1 into r1
-            ld r2 2     # load input slot 2 into r2
-            ld r3 3     # load input slot 3 into r3
-            st pos r0   # store r0 to output position slot
-            st tex r1   # store r1 to output texcoord slot
-            st col r2   # store r2 to output color slot
-            st ocol r3  # store r3 to output ocolor slot
+            ld r0 0                     # load input slot 0 into r0
+            ld r1 1                     # load input slot 1 into r1
+            ld r2 2                     # load input slot 2 into r2
+            ld r3 3                     # load input slot 3 into r3
+            shf r1 r1 [0 1 0 1] 0b1111  # r1 = r1.xyxy (note: xy is used for tu0, zw is used for tu1)
+            st pos r0                   # store r0 to output position slot
+            st tex r1                   # store r1 to output texcoord slot
+            st col r2                   # store r2 to output color slot
+            st ocol r3                  # store r3 to output ocolor slot
             end
         */
         Span<uint> defaultVuProg = [
@@ -665,6 +676,7 @@ class VDP : IDisposable
             EncodeVUInstr(0, 1, 1),
             EncodeVUInstr(0, 2, 2),
             EncodeVUInstr(0, 3, 3),
+            EncodeVUInstr(14, 1, 1, 0, 1, 0, 1, 0b1111),
             EncodeVUInstr(1, 0, 0),
             EncodeVUInstr(1, 1, 1),
             EncodeVUInstr(1, 2, 2),
@@ -752,16 +764,23 @@ class VDP : IDisposable
             {
                 SDL.SDL_BindGPUFragmentSamplers(_activeRenderPass, 0, [
                     new SDL.SDL_GPUTextureSamplerBinding() {
-                        texture = cmd.texture?.handle ?? _blankTexture.handle,
-                        sampler = GetOrCreateSampler(cmd.textureSettings)
+                        texture = cmd.tu0?.handle ?? _blankTexture.handle,
+                        sampler = GetOrCreateSampler(cmd.sampleTU0)
+                    },
+                    new SDL.SDL_GPUTextureSamplerBinding() {
+                        texture = cmd.tu1?.handle ?? _blankTexture.handle,
+                        sampler = GetOrCreateSampler(cmd.sampleTU1)
                     }
-                ], 1);
+                ], 2);
             }
 
             unsafe
             {
                 VUCData* cdata_ptr = &cmd.cdata;
                 SDL.SDL_PushGPUVertexUniformData(_activeCmdBuf, 0, (nint)cdata_ptr, (uint)Unsafe.SizeOf<VUCData>());
+
+                FFParams* ffParams_ptr = &cmd.ffParams;
+                SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)ffParams_ptr, (uint)Unsafe.SizeOf<FFParams>());
             }
 
             SDL.SDL_DrawGPUPrimitives(_activeRenderPass, (uint)vtxCount, 1, 0, 0);
@@ -1047,12 +1066,25 @@ class VDP : IDisposable
         _drawSettings.culling = enabled;
     }
 
-    public void SetSampleParams(VDPFilter filter, VDPWrap wrapU, VDPWrap wrapV)
+    public void SetSampleParams(int slot, VDPFilter filter, VDPWrap wrapU, VDPWrap wrapV)
     {
         _needsNewTexture = true;
-        _sampleSettings.filter = filter;
-        _sampleSettings.wrapU = wrapU;
-        _sampleSettings.wrapV = wrapV;
+
+        switch (slot)
+        {
+            case 0: {
+                _sampleTU0.filter = filter;
+                _sampleTU0.wrapU = wrapU;
+                _sampleTU0.wrapV = wrapV;
+                break;
+            }
+            case 1: {
+                _sampleTU1.filter = filter;
+                _sampleTU1.wrapU = wrapU;
+                _sampleTU1.wrapV = wrapV;
+                break;
+            }
+        }
     }
 
     public int AllocTexture(bool mipmap, VDPTextureFormat format, int width, int height)
@@ -1268,23 +1300,42 @@ class VDP : IDisposable
         }
     }
 
-    public void BindTexture(int handle)
+    public void BindTexture(int slot, int handle)
     {
-        _needsNewTexture = true;
+        Texture? value;
 
         if (handle == -1)
         {
-            _activeTexture = null;
-            return;
+            value = null;
         }
-
-        if (handle < 0 || handle >= _texCache.Count)
+        else if (handle < 0 || handle >= _texCache.Count)
         {
             Console.WriteLine("Attempted to bind invalid texture handle: " + handle);
             return;
         }
+        else
+        {
+            value = _texCache[handle]?.texture;
+        }
 
-        _activeTexture = _texCache[handle]?.texture;
+        switch (slot) {
+            case 0: {
+                _activeTU0 = value;
+                break;
+            }
+            case 1: {
+                _activeTU1 = value;
+                break;
+            }
+        }
+
+        _needsNewTexture = true;
+    }
+
+    public void SetTexCombine(VDPTexCombine texCombine, VDPTexCombine vtxCombine)
+    {
+        _texCombine = texCombine;
+        _vtxCombine = vtxCombine;
     }
 
     public void Viewport(int x, int y, int w, int h)
@@ -1355,8 +1406,14 @@ class VDP : IDisposable
             needsNewPso = _needsNewPipeline,
             psoSettings = _drawSettings,
             needsNewTexture = _needsNewTexture,
-            textureSettings = _sampleSettings,
-            texture = _activeTexture,
+            sampleTU0 = _sampleTU0,
+            sampleTU1 = _sampleTU1,
+            tu0 = _activeTU0,
+            tu1 = _activeTU1,
+            ffParams = new FFParams() {
+                texCombine = (uint)_texCombine,
+                vtxCombine = (uint)_vtxCombine
+            },
             cdata = _vu_cdata,
             program = _vu_program_data,
         });

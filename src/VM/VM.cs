@@ -75,7 +75,14 @@ class Runtime
             wasmData = mem_stream.ToArray();
         }
 
-        Config wasmConfig = new Config().WithWasmThreads(true).WithOptimizationLevel(debug ? OptimizationLevel.None : OptimizationLevel.Speed).WithDebugInfo(debug);
+        Config wasmConfig = new Config()
+            .WithWasmThreads(true)
+            .WithBulkMemory(true)
+            .WithSIMD(true)
+            .WithRelaxedSIMD(true, false)
+            .WithOptimizationLevel(debug ? OptimizationLevel.None : OptimizationLevel.Speed)
+            .WithDebugInfo(debug);
+        
         engine = new Engine(wasmConfig);
         module = Module.FromBytes(engine, "main", wasmData);
         _linker = new Linker(engine);
@@ -124,6 +131,9 @@ class Runtime
         _linker.DefineFunction<int>("env", "vdp_setRenderTarget", vdp_setRenderTarget);
         _linker.DefineFunction<int, int, int>("env", "vdp_setSampleParams", vdp_setSampleParams);
         _linker.DefineFunction<int>("env", "vdp_bindTexture", vdp_bindTexture);
+        _linker.DefineFunction<int, int, int, int>("env", "vdp_setSampleParamsSlot", vdp_setSampleParamsSlot);
+        _linker.DefineFunction<int, int>("env", "vdp_bindTextureSlot", vdp_bindTextureSlot);
+        _linker.DefineFunction<int, int>("env", "vdp_setTexCombine", vdp_setTexCombine);
         _linker.DefineFunction<int, int, int, int>("env", "vdp_viewport", vdp_viewport);
         _linker.DefineFunction<float, int, int, int, int, int>("env", "vdp_submitDepthQuery", vdp_submitDepthQuery);
         _linker.DefineFunction("env", "vdp_getDepthQueryResult", vdp_getDepthQueryResult);
@@ -1066,12 +1076,27 @@ class Runtime
 
     private void vdp_setSampleParams(int filter, int wrapU, int wrapV)
     {
-        _vdp.SetSampleParams((VDPFilter)filter, (VDPWrap)wrapU, (VDPWrap)wrapV);
+        _vdp.SetSampleParams(0, (VDPFilter)filter, (VDPWrap)wrapU, (VDPWrap)wrapV);
     }
 
     private void vdp_bindTexture(int handle)
     {
-        _vdp.BindTexture(handle);
+        _vdp.BindTexture(0, handle);
+    }
+
+    private void vdp_setSampleParamsSlot(int slot, int filter, int wrapU, int wrapV)
+    {
+        _vdp.SetSampleParams(slot, (VDPFilter)filter, (VDPWrap)wrapU, (VDPWrap)wrapV);
+    }
+
+    private void vdp_bindTextureSlot(int slot, int handle)
+    {
+        _vdp.BindTexture(slot, handle);
+    }
+
+    private void vdp_setTexCombine(int texCombine, int vtxCombine)
+    {
+        _vdp.SetTexCombine((VDPTexCombine)texCombine, (VDPTexCombine)vtxCombine);
     }
 
     private void vdp_viewport(int x, int y, int width, int height)

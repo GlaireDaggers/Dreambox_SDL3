@@ -2,9 +2,10 @@
 
 layout(location = 0) in vec4 vtx[8];
 
-layout(location = 0) out vec2 fTex;
-layout(location = 1) out vec4 fCol;
-layout(location = 2) out vec4 fOCol;
+layout(location = 0) out vec2 fTex0;
+layout(location = 1) out vec2 fTex1;
+layout(location = 2) out vec4 fCol;
+layout(location = 3) out vec4 fOCol;
 
 layout(std430, set = 0, binding = 0) buffer ProgramData {
    uint data[];
@@ -124,7 +125,8 @@ void main() {
     }
 
     gl_Position = odata[0];
-    fTex = odata[1].xy;
-    fCol = odata[2];
-    fOCol = odata[3];
+    fTex0 = odata[1].xy;
+    fTex1 = odata[1].zw;
+    fCol = clamp(odata[2], 0.0, 1.0);
+    fOCol = clamp(odata[3], 0.0, 1.0);
 }
