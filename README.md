@@ -17,10 +17,12 @@ This port saves user data into a new folder compared to the old FNA version.
 The config JSON file format is not compatible with the old FNA version. However, the memory card save file format is identical.
 
 # New features!
-New extensions have been added to the Dreambox API in this port which didn't exist in the original. These are:
+New extensions have been added to the Dreambox API in this port which didn't exist in the original (NOTE: these are currently considered experimental and subject to change). These are:
 
-- `vdp_loadTransform` allows you to load a 4x4 matrix to transform vertex positions instead of having to manually transform vertex positions prior to submission.
-- `vdp_setLighting` allows you to enable or disable built-in lighting. If enabled, the "color" field is instead treated as encoding vertex normals (the 0..1 range is expanded to the -1..1 range).
-- `vdp_loadLightTransforms` allows you to load a pair of 4x4 matrices which are used to compute lighting from input normals, if lighting is enabled. This works a bit like the lighting feature of the Playstation 1 - one matrix is used to first transform input normals into one intensity per light source (3 channels = 3 directional lights), and then another matrix is used to multiply those 3 intensities against 3 light colors and sum into final vertex color (as well as adding ambient light color). You could alternatively use just the first matrix for SH lighting & set the second matrix to identity.
+- `vdp_setVUCData` allows you to set one of 16 "constant data" slots of the "Vertex Unit" (VU) with a vector value.
+- `vdp_setVULayout` allows you to configure one of 8 "vertex input slots" of the VU, representing vertex input data (such as position, normal, texcoord, color, etc)
+- `vdp_setVUStride` allows you to configure the byte stride of input vertex data to the VU
+- `vdp_uploadVUProgram` allows you to upload a VU program of up to 64 instructions, which will execute per-vertex and is responsible for transforming input vertex data into the existing built-in output fields (position, texcoord, color, and ocolor)
+- `vdp_submitVU` allows you to submit vertex input data to the VU (note: the VU will also execute for vertices submitted via `vdp_drawGeometry` and `vdp_drawGeometryPacked`, but `vdp_submitVU` makes no assumptions about the size or format of the input data)
 - `vdp_allocRenderTexture` allows you to allocate an RGBA32 texture which can be rendered into (along with an associated depth buffer).
 - `vdp_setRenderTarget` allows you to set a previously allocated render texture to be rendered into, or alternatively to set the current target to the built-in framebuffer.
