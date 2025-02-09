@@ -5,7 +5,7 @@ using System.Runtime.CompilerServices;
 using SDL3;
 using Wasmtime;
 
-class Runtime
+class Runtime : IDisposable
 {
     private const int TOTAL_MEM = 256;
 
@@ -20,9 +20,10 @@ class Runtime
     }
 
     public readonly Engine engine;
-    public readonly Module module;
-    public readonly Instance moduleInstance;
-    public readonly Memory memory;
+
+    public Module? module;
+    public Instance? moduleInstance;
+    public Memory? memory;
 
     private Linker _linker;
     private Store _store;
@@ -39,22 +40,24 @@ class Runtime
 
     private Matrix4x4 _mat4;
 
-    private Func<int> __errno_location;
-    private readonly Func<int> _main;
-    private readonly Func<int, int> _malloc;
-    private readonly Action<int> _free;
+    private Func<int>? __errno_location;
+    private Func<int>? _main;
+    private Func<int, int>? _malloc;
+    private Action<int>? _free;
 
     private Action? _vsync;
 
     private int _dirEntBuffer;
-    private string _tableName;
+    private string _tableName = "";
 
     private PackedVertex[] _tmpPackedVertex = new PackedVertex[1024];
     private byte[] _tmpPackedVertexBufferData = new byte[1024 * 32];
 
     private DreamboxConfig _config;
 
-    public Runtime(DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
+    private Module? _queueLoadModule = null;
+
+    public Runtime(Span<byte> wasmBytes, DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
     {
         _config = config;
         
@@ -65,16 +68,6 @@ class Runtime
         _audioSystem = audioSystem;
         _inputSystem = inputSystem;
 
-        // attempt to load main.wasm from disk
-        byte[] wasmData;
-
-        using (var main_file = disk.OpenRead("main.wasm"))
-        using (var mem_stream = new MemoryStream())
-        {
-            main_file.CopyTo(mem_stream);
-            wasmData = mem_stream.ToArray();
-        }
-
         Config wasmConfig = new Config()
             .WithWasmThreads(true)
             .WithBulkMemory(true)
@@ -84,28 +77,12 @@ class Runtime
             .WithDebugInfo(debug);
         
         engine = new Engine(wasmConfig);
-        module = Module.FromBytes(engine, "main", wasmData);
+        
         _linker = new Linker(engine);
         _store = new Store(engine);
 
         WasiConfiguration wasiConfig = new WasiConfiguration();
         _store.SetWasiConfiguration(wasiConfig);
-
-        _tableName = "";
-        bool found = false;
-
-        foreach (var export in module.Exports) {
-            if (export is TableExport) {
-                Console.WriteLine("Found function table: " + export.Name);
-                _tableName = export.Name;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            Console.WriteLine("WARNING: No function table exported! Callbacks will not work correctly");
-        }
 
         _linker.DefineFunction<int>("env", "db_log", db_log);
         _linker.DefineFunction<int>("env", "vdp_clearColor", vdp_clearColor);
@@ -197,6 +174,62 @@ class Runtime
         _linker.DefineFunction<int, int, int>("env", "emscripten_memcpy_big", emscripten_memcpy_big);
         _linker.DefineFunction<int, int>("env", "emscripten_resize_heap", emscripten_resize_heap);
 
+        LoadModule(wasmBytes);
+    }
+
+    public void Dispose()
+    {
+        foreach (var f in _files)
+        {
+            f?.Close();
+        }
+    }
+
+    public void LoadModule(Span<byte> wasmData)
+    {
+        _queueLoadModule = Module.FromBytes(engine, "main", wasmData);
+    }
+
+    public void Tick()
+    {
+        if (_queueLoadModule != null)
+        {
+            initModule(_queueLoadModule);
+            _queueLoadModule = null;
+
+            int mainRet = _main!.Invoke();
+            Console.WriteLine($"main() returned {mainRet}");
+        }
+
+        _vsync?.Invoke();
+    }
+
+    public Span<T> GetSpan<T>(int address, int elemCount)
+        where T : unmanaged
+    {
+        return memory!.GetSpan<T>(address)[..elemCount];
+    }
+
+    private void initModule(Module newModule)
+    {
+        module = newModule;
+
+        _tableName = "";
+        bool found = false;
+
+        foreach (var export in module.Exports) {
+            if (export is TableExport) {
+                Console.WriteLine("Found function table: " + export.Name);
+                _tableName = export.Name;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            Console.WriteLine("WARNING: No function table exported! Callbacks will not work correctly");
+        }
+
         moduleInstance = _linker.Instantiate(_store, module);
         memory = moduleInstance.GetMemory("memory") ?? throw new Exception("Module is missing memory export");
 
@@ -242,33 +275,18 @@ class Runtime
             _dirEntBuffer += 4;
         }
         Console.WriteLine($"Allocated dirent buffer at: 0x{_dirEntBuffer:X8}");
-    }
 
-    public void Start()
-    {
-        int mainRet = _main.Invoke();
-        Console.WriteLine($"main() returned {mainRet}");
-    }
-
-    public void Tick()
-    {
-        _vsync?.Invoke();
-    }
-
-    public Span<T> GetSpan<T>(int address, int elemCount)
-        where T : unmanaged
-    {
-        return memory.GetSpan<T>(address)[..elemCount];
+        _vsync = null;
     }
 
     private void setErrno(DreamboxErrno err)
     {
-        memory.WriteInt32(__errno_location(), (int)err);
+        memory!.WriteInt32(__errno_location!(), (int)err);
     }
 
     private void __assert_fail(int assertionMsgPtr, int filenamePtr, int line, int fnNamePtr)
     {
-        string assertionMsg = memory.ReadNullTerminatedString(assertionMsgPtr);
+        string assertionMsg = memory!.ReadNullTerminatedString(assertionMsgPtr);
         string filename = memory.ReadNullTerminatedString(filenamePtr);
         string fnName = memory.ReadNullTerminatedString(fnNamePtr);
 
@@ -283,7 +301,7 @@ class Runtime
     private void clock_timestampToDatetime(long timestamp, int datetimePtr)
     {
         DateTime dt = MemCardFS.TimestampToDateTime((ulong)timestamp);
-        memory.Write(datetimePtr, new clock_dateTime
+        memory!.Write(datetimePtr, new clock_dateTime
         {
             year = (ushort)dt.Year,
             month = (byte)dt.Month,
@@ -296,7 +314,7 @@ class Runtime
 
     private long clock_datetimeToTimestamp(int datetimePtr)
     {
-        clock_dateTime cdt = memory.Read<clock_dateTime>(datetimePtr);
+        clock_dateTime cdt = memory!.Read<clock_dateTime>(datetimePtr);
         DateTime dt = new DateTime(cdt.year, cdt.month, cdt.day, cdt.hour, cdt.minute, cdt.second);
         return (long)MemCardFS.DateTimeToTimestamp(dt);
     }
@@ -320,7 +338,7 @@ class Runtime
             return 0;
         }
 
-        string filename = memory.ReadNullTerminatedString(filenamePtr);
+        string filename = memory!.ReadNullTerminatedString(filenamePtr);
         Span<byte> iconData = GetSpan<byte>(iconPtr, 128);
         Span<ushort> paletteData = GetSpan<ushort>(iconPalettePtr, 16);
 
@@ -354,7 +372,7 @@ class Runtime
 
     private int fs_deviceExists(int devstrPtr)
     {
-        string devstr = memory.ReadNullTerminatedString(devstrPtr);
+        string devstr = memory!.ReadNullTerminatedString(devstrPtr);
 
         if (devstr == "cd")
         {
@@ -376,7 +394,7 @@ class Runtime
 
     private void fs_deviceEject(int devstrPtr)
     {
-        string devstr = memory.ReadNullTerminatedString(devstrPtr);
+        string devstr = memory!.ReadNullTerminatedString(devstrPtr);
 
         if (devstr == "cd")
         {
@@ -412,7 +430,7 @@ class Runtime
             return 0;
         }
 
-        string path = memory.ReadNullTerminatedString(pathstr);
+        string path = memory!.ReadNullTerminatedString(pathstr);
 
         DirectoryReader dirReader;
         if (path.StartsWith("/cd/"))
@@ -472,7 +490,7 @@ class Runtime
         {
             int ptr = _dirEntBuffer + (152 * handle);
             
-            int nameLen = memory.WriteString(ptr, d.name);
+            int nameLen = memory!.WriteString(ptr, d.name);
             memory.WriteByte(ptr + nameLen, 0);
 
             memory.WriteInt64(ptr + 128, (long)MemCardFS.DateTimeToTimestamp(d.created));
@@ -534,7 +552,7 @@ class Runtime
             return 0;
         }
 
-        string path = memory.ReadNullTerminatedString(pathstr);
+        string path = memory!.ReadNullTerminatedString(pathstr);
 
         Stream stream;
 
@@ -628,7 +646,7 @@ class Runtime
 
     private int fs_fileExists(int pathstr)
     {
-        string path = memory.ReadNullTerminatedString(pathstr);
+        string path = memory!.ReadNullTerminatedString(pathstr);
 
         if (path.StartsWith("/cd/"))
         {
@@ -852,17 +870,17 @@ class Runtime
 
     private void mat_load(int matpatr)
     {
-        _mat4 = memory.Read<Matrix4x4>(matpatr);
+        _mat4 = memory!.Read<Matrix4x4>(matpatr);
     }
 
     private void mat_store(int matpatr)
     {
-        memory.Write<Matrix4x4>(matpatr, _mat4);
+        memory!.Write<Matrix4x4>(matpatr, _mat4);
     }
 
     private void mat_mul(int matptr)
     {
-        Matrix4x4 m = memory.Read<Matrix4x4>(matptr);
+        Matrix4x4 m = memory!.Read<Matrix4x4>(matptr);
         _mat4 *= m;
     }
 
@@ -870,7 +888,7 @@ class Runtime
     {
         for (int i = 0; i < count; i++)
         {
-            Vector4 v = memory.Read<Vector4>(invec_ptr);
+            Vector4 v = memory!.Read<Vector4>(invec_ptr);
             v = Vector4.Transform(v, _mat4);
             memory.Write<Vector4>(outvec_ptr, v);
 
@@ -894,18 +912,18 @@ class Runtime
         _inputSystem.gamepads[slot]?.PollState();
         var state = _inputSystem.gamepads[slot]?.GetState() ?? new Gamepad.State();
 
-        memory.Write(statePtr, state);
+        memory!.Write(statePtr, state);
     }
 
     private void db_log(int ptr)
     {
-        string msg = memory.ReadNullTerminatedString(ptr);
+        string msg = memory!.ReadNullTerminatedString(ptr);
         Console.WriteLine("[DBG] " + msg);
     }
 
     private void vdp_clearColor(int colorPtr)
     {
-        _vdp.ClearColor(memory.Read<Color32>(colorPtr));
+        _vdp.ClearColor(memory!.Read<Color32>(colorPtr));
     }
 
     private void vdp_clearDepth(float depth)
@@ -950,7 +968,7 @@ class Runtime
 
     private void vdp_drawGeometry(int topology, int first, int count, int vertexDataPtr)
     {
-        var vtxSpan = memory.GetSpan<Vertex>(vertexDataPtr).Slice(first, count);
+        var vtxSpan = memory!.GetSpan<Vertex>(vertexDataPtr).Slice(first, count);
         int newLen = _tmpPackedVertex.Length;
         
         while (newLen < vtxSpan.Length) {
@@ -990,13 +1008,13 @@ class Runtime
 
     private void vdp_drawGeometryPacked(int topology, int first, int count, int vertexDataPtr)
     {
-        var vtxSpan = memory.GetSpan<byte>(vertexDataPtr).Slice(first, count * Unsafe.SizeOf<PackedVertex>());
+        var vtxSpan = memory!.GetSpan<byte>(vertexDataPtr).Slice(first, count * Unsafe.SizeOf<PackedVertex>());
         _vdp.SubmitVU((VDPTopology)topology, vtxSpan);
     }
 
     private void vdp_setVsyncHandler(int handlerPtr)
     {
-        var table = moduleInstance.GetTable(_tableName);
+        var table = moduleInstance!.GetTable(_tableName);
         if (table == null) return;
 
         try
@@ -1038,8 +1056,8 @@ class Runtime
 
     private void vdp_copyFbToTexture(int srcRectPtr, int dstRectPtr, int dstTextureHandle)
     {
-        SDL.SDL_Rect srcRect = memory.Read<SDL.SDL_Rect>(srcRectPtr);
-        SDL.SDL_Rect dstRect = memory.Read<SDL.SDL_Rect>(dstRectPtr);
+        SDL.SDL_Rect srcRect = memory!.Read<SDL.SDL_Rect>(srcRectPtr);
+        SDL.SDL_Rect dstRect = memory!.Read<SDL.SDL_Rect>(dstRectPtr);
         _vdp.CopyFBToTexture(srcRect, dstRect, dstTextureHandle);
     }
 
@@ -1221,22 +1239,20 @@ class Runtime
 
     private void bios_loadProgram(int codePtr, int codeLen)
     {
-        throw new NotImplementedException();
-        
-        //var programData = GetSpan<byte>(codePtr, codeLen).ToArray();
-        //game.LoadModule(programData);
+        var programData = GetSpan<byte>(codePtr, codeLen).ToArray();
+        LoadModule(programData);
     }
 
     private void bios_getPrefLang(int outLangStr)
     {
         // why on earth does this not write a null terminator
-        int ct = memory.WriteString(outLangStr, _config.Lang);
+        int ct = memory!.WriteString(outLangStr, _config.Lang);
         memory.WriteByte(outLangStr + ct, 0);
     }
 
     private void bios_setPrefLang(int langStr)
     {
-        _config.Lang = memory.ReadNullTerminatedString(langStr);
+        _config.Lang = memory!.ReadNullTerminatedString(langStr);
     }
 
     private float bios_getPrefAudioVolume()

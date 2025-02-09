@@ -120,6 +120,43 @@ public interface IDiskDriver
     bool FileExists(string path);
 }
 
+public class DiskDriverWrapper : IDiskDriver
+{
+    public IDiskDriver? internalDriver;
+
+    public void Update(float dt) {
+        internalDriver?.Update(dt);
+    }
+
+    public string? GetLabel() {
+        return internalDriver?.GetLabel();
+    }
+    
+    public void Insert(Stream fs) {
+        internalDriver?.Insert(fs);
+    }
+    
+    public void Eject() {
+        internalDriver?.Eject();
+    }
+    
+    public bool Inserted() {
+        return internalDriver?.Inserted() ?? false;
+    }
+    
+    public DirectoryReader? OpenDirectory(string path) {
+        return internalDriver?.OpenDirectory(path);
+    }
+    
+    public Stream OpenRead(string path) {
+        return internalDriver?.OpenRead(path) ?? throw new Exception("No disk mounted");
+    }
+    
+    public bool FileExists(string path) {
+        return internalDriver?.FileExists(path) ?? false;
+    }
+}
+
 public class ISODiskDriver : IDiskDriver
 {
     private CDReader? _reader;

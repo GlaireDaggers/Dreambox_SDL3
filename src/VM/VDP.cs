@@ -530,6 +530,8 @@ class VDP : IDisposable
 
     private Queue<VUDrawCmd> _drawQueue = new Queue<VUDrawCmd>();
 
+    private Queue<IDisposable> _disposeQueue = new Queue<IDisposable>();
+
     private PipelineSettings _drawSettings = new PipelineSettings() {
         topology = VDPTopology.TRIANGLE_LIST,
         depthWrite = false,
@@ -668,6 +670,14 @@ class VDP : IDisposable
             address_mode_v = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         });
 
+        ResetCompat();
+    }
+
+    public void ResetCompat()
+    {
+        _activeTU0 = null;
+        _activeTU1 = null;
+
         // default VU settings for backwards compat
         _drawSettings.vuStride = 32;
         _drawSettings.vuLayout[0] = new VDPVertexSlot() {
@@ -712,7 +722,7 @@ class VDP : IDisposable
             EncodeVUInstr(15, 0, 0),
         ];
 
-        var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(graphicsDevice.handle);
+        var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(_graphicsDevice.handle);
         var copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
         {
             _blankTexture.SetData(copyPass, cmdBuf, [ new Color32(255, 255, 255) ], 0, 0, 0, 0, 0, 1, 1, 1, false);
@@ -736,6 +746,11 @@ class VDP : IDisposable
         {
             _vu_data.Dispose();
             _vu_data = new GraphicsBuffer(_graphicsDevice, _frameVUData.Capacity, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX);
+        }
+
+        if (_activeCopyPass != 0)
+        {
+            throw new Exception("oops");
         }
 
         var copyPass = SDL.SDL_BeginGPUCopyPass(_activeCmdBuf);
@@ -1259,7 +1274,11 @@ class VDP : IDisposable
             return;
         }
 
-        _texCache[handle]?.Dispose();
+        if (_texCache[handle] is VdpTexture tex)
+        {
+            _disposeQueue.Enqueue(tex);
+        }
+
         _texCache[handle] = null;
     }
 
@@ -1510,6 +1529,8 @@ class VDP : IDisposable
 
     public void SubmitVU(VDPTopology topology, Span<byte> data)
     {
+        FlushCopyPass();
+
         int bufferOffset = _frameVUData.Count;
         int bufferLen = data.Length;
 
@@ -1548,8 +1569,14 @@ class VDP : IDisposable
 
     public void EndFrame(out int numSkipFrames)
     {
+        FlushCopyPass();
         FlushDrawQueue();
         FlushRenderPass();
+
+        while (_disposeQueue.TryDequeue(out var res))
+        {
+            res.Dispose();
+        }
 
         // TODO: use vertex cycles instead of number of vertices
         numSkipFrames = _totalVerticesThisFrame / VERTICES_PER_FRAME;

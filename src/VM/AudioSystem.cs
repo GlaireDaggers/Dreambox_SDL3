@@ -867,7 +867,7 @@ public class AudioSystem : IDisposable
                 int mixLen = (buffer.Length / CHANNELS) - written;
                 int bufferStart = written * CHANNELS;
                 int bufferEnd = bufferStart + (mixLen * CHANNELS);
-                var reverbSlice = _reverbBuffer[bufferStart..bufferEnd];
+                var reverbSlice = _reverbBuffer.AsSpan()[bufferStart..bufferEnd];
                 var drySlice = buffer[bufferStart..bufferEnd];
                 MixVoices(reverbSlice, drySlice);
                 written += mixLen;

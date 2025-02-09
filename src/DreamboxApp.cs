@@ -67,11 +67,11 @@ class DreamboxApp
     private readonly List<WindowBase> _windowStack = [];
     private readonly Queue<WindowBase> _closedWindows = [];
 
-    private readonly VDP _vdp;
-    private readonly AudioSystem _audioSys;
+    private VDP _vdp;
+    private AudioSystem _audioSys;
     private readonly InputSystem _inputSys;
 
-    private Runtime? _vm = null;
+    private Runtime _vm;
 
     private readonly MemoryCard _mca;
     private readonly MemoryCard _mcb;
@@ -80,6 +80,7 @@ class DreamboxApp
 
     private bool _debug = false;
 
+    private DiskDriverWrapper _disk;
     private IDiskDriver? _queueLoadDisk = null;
 
     public DreamboxApp(bool debug)
@@ -121,6 +122,9 @@ class DreamboxApp
         _audioSys = new AudioSystem();
         _inputSys = new InputSystem(_config);
 
+        _disk = new DiskDriverWrapper();
+        _disk.internalDriver = new ISODiskDriver();
+
         _mca = new MemoryCard(PathUtils.GetPath("memcard_a.sav"));
         _mcb = new MemoryCard(PathUtils.GetPath("memcard_b.sav"));
 
@@ -134,6 +138,8 @@ class DreamboxApp
                 };
             }
         }
+
+        _vm = InitVM();
     }
 
     public void LoadISO(string path)
@@ -163,15 +169,7 @@ class DreamboxApp
             {
                 if (_queueLoadDisk != null)
                 {
-                    try
-                    {
-                        _vm = new Runtime(_config, _queueLoadDisk, _mca, _mcb, _vdp, _audioSys, _inputSys, _debug);
-                        _vm.Start();
-                    }
-                    catch(Exception e)
-                    {
-                        Console.WriteLine("Failed loading game disk: " + e.Message);
-                    }
+                    _disk.internalDriver = _queueLoadDisk;
                     _queueLoadDisk = null;
                 }
             }
@@ -229,12 +227,15 @@ class DreamboxApp
                 {
                     int numFrames = (int)(frameAccum / frameInterval);
 
-                    if (!_paused) {
-                        if (skipFrames > 0) {
+                    if (!_paused)
+                    {
+                        if (skipFrames > 0)
+                        {
                             skipFrames -= numFrames;
                             if (skipFrames < 0) skipFrames = 0;
                         }
-                        else {
+                        else
+                        {
                             _vdp.BeginFrame(cmdBuf);
                             {
                                 _vm?.Tick();
@@ -311,13 +312,20 @@ class DreamboxApp
         SDL.SDL_Quit();
     }
 
+    private Runtime InitVM()
+    {
+        // init VM with BIOS
+        byte[] bios = File.ReadAllBytes("content/bios.wasm");
+        return new Runtime(bios, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+    }
+
     private unsafe void DrawUI(ref bool quit)
     {
         if (ImGui.BeginMainMenuBar())
         {
             if (ImGui.BeginMenu("Emulation"))
             {
-                if (ImGui.MenuItem("Open Game (ISO)"))
+                if (ImGui.MenuItem("Insert Game Disc (ISO)"))
                 {
                     SDL.SDL_ShowOpenFileDialog(HandleOpenGameDialog, 0, _window, [
                         new () {
@@ -327,7 +335,7 @@ class DreamboxApp
                     ], 1, null, false);
                     _paused = true;
                 }
-                if (ImGui.MenuItem("Open Game (CD/DVD)"))
+                if (ImGui.MenuItem("Enable CD/DVD Driver"))
                 {
                     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                     {
@@ -337,6 +345,19 @@ class DreamboxApp
                     {
                         _queueLoadDisk = new LinuxCDDiskDriver();
                     }
+                }
+                if (ImGui.MenuItem("Eject Game Disc"))
+                {
+                    _disk.Eject();
+                }
+                if (ImGui.MenuItem("Reset"))
+                {
+                    _vm.Dispose();
+                    _vdp.Dispose();
+                    _audioSys.Dispose();
+                    _vdp = new VDP(_graphicsDevice);
+                    _audioSys = new AudioSystem();
+                    _vm = InitVM();
                 }
                 if (_config.RecentGames.Count == 0)
                 {
@@ -389,6 +410,22 @@ class DreamboxApp
                 }
                 ImGui.EndMenu();
             }
+
+            // status text
+            {
+                ImGui.SameLine(0f, 100f);
+                if (_disk.internalDriver is ISODiskDriver)
+                {
+                    ImGui.TextDisabled("Disk Driver: ISO");
+                }
+                else if (_disk.internalDriver is WindowsCDDiskDriver || _disk.internalDriver is LinuxCDDiskDriver)
+                {
+                    ImGui.TextDisabled("Disk Driver: CD/DVD");
+                }
+                ImGui.SameLine(0f, 50f);
+                ImGui.TextDisabled("Disk: " + (_disk.GetLabel() ?? "(none)"));
+            }
+
             ImGui.EndMainMenuBar();
         }
 
