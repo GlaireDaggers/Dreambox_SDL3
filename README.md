@@ -1,11 +1,11 @@
 # Dreambox SDL3
-A (mostly complete) SDL3 port of the Dreambox fantasy console runtime
+An SDL3 port of the Dreambox fantasy console runtime
 
 # What works, what doesn't?
 Just about everything works. There's just a couple of things that have not been implemented:
 
 - Depth queries are not implemented. This was built on occlusion queries, which are just not plain not supported on SDL3. For now, attempting to submit a depth query will do nothing, and will always return a result of 0. If there's enough demand for it, I may eventually consider re-implementing these via compute shader or something.
-- The built-in "boot UI" has not yet been implemented.
+- Video cable effects (Composite, S-Video, VGA, etc) are not yet implemented. This is purely an aesthetic thing, and will not impede actually running games :)
 
 # Changes
 This port saves user data into a new folder compared to the old FNA version.
