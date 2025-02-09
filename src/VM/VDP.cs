@@ -301,6 +301,9 @@ class VDP : IDisposable
         { VDPTextureFormat.RGBA8888, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM },
         { VDPTextureFormat.DXT1, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM },
         { VDPTextureFormat.DXT3, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM },
+
+        // bit of a special case (technically it's just an RGBA8 texture, but uses a compute shader to convert YUV)
+        { VDPTextureFormat.YUV420, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM },
     };
 
     class VdpTexture : IDisposable
@@ -319,6 +322,12 @@ class VDP : IDisposable
         public virtual void SetData<T>(nint copyPass, nint cmdBuf, int level, SDL.SDL_Rect? rect, Span<T> data)
             where T : unmanaged
         {
+            if (format == VDPTextureFormat.YUV420)
+            {
+                Console.WriteLine("Tried to SetTextureData on YUV texture (use SetTextureDataYUV instead)");
+                return;
+            }
+
             int levelW = texture.width >> level;
             int levelH = texture.height >> level;
 
@@ -461,6 +470,15 @@ class VDP : IDisposable
         private uint _pad1;
     }
 
+    struct ConvertYUVParams
+    {
+        public uint imgWidth;
+        public uint imgHeight;
+
+        private uint _pad0;
+        private uint _pad1;
+    }
+
     struct VUDrawCmd
     {
         public int bufferOffset;
@@ -558,7 +576,12 @@ class VDP : IDisposable
     private int _totalVerticesThisFrame = 0;
 
     private VUCData _vu_cdata;
-    private VUProgram? _vu_program_data;
+    private VUProgram? _vu_programData;
+
+    private ComputePipeline _convertYuvPipeline;
+    private GraphicsBuffer _yuvBuffer;
+
+    private uint _frameCount;
 
     public VDP(GraphicsDevice graphicsDevice)
     {
@@ -621,6 +644,11 @@ class VDP : IDisposable
             new () {
                 compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
             });
+
+        _convertYuvPipeline = new ComputePipeline(graphicsDevice, File.ReadAllBytes("content/shaders/convert_yuv.spv"), "main", 0, 0, 1, 1, 0, 1, 1, 1, 1);
+
+        // enough of a buffer to convert a 1024x1024 YUV image
+        _yuvBuffer = new GraphicsBuffer(graphicsDevice, (1024 * 1024) + (512 * 512 * 2), SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
 
         // vertex buffers
         _blitQuad = new VertexBuffer<BlitVertex>(graphicsDevice, 6);
@@ -1015,6 +1043,8 @@ class VDP : IDisposable
         _needsNewTexture = true;
         _frameVUData.Clear();
         _totalVerticesThisFrame = 0;
+
+        SDL.SDL_PushGPUDebugGroup(cmdBuf, $"VDP FRAME {_frameCount++}");
     }
 
     public void ClearColor(Color32 color)
@@ -1093,8 +1123,35 @@ class VDP : IDisposable
 
         if (format == VDPTextureFormat.YUV420)
         {
-            // TODO
-            throw new NotImplementedException();
+            // width and height must be divisible by 2
+            if ((width % 2) != 0 || (height % 2) != 0)
+            {
+                Console.WriteLine("YUV texture dimensions must be divisible by 2");
+                return -1;
+            }
+
+            // mipmapping not allowed
+            if (mipmap)
+            {
+                Console.WriteLine("Mipmapping on YUV textures unsupported");
+                return -1;
+            }
+
+            int totalSize = calcTextureTotalSize(format, width, height, 1);
+
+            if (_totalTexMem + totalSize >= MAX_TEXTURE_MEM)
+            {
+                Console.WriteLine("Texture memory exhausted");
+                return -1;
+            }
+
+            SDL.SDL_GPUTextureUsageFlags flags = SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER |
+                SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+
+            Texture texture = new Texture(_graphicsDevice, FORMAT_TO_SDL[format], width, height, 1, flags);
+            vdpTex = new VdpTexture(format, texture);
+
+            _totalTexMem += totalSize;
         }
         else
         {
@@ -1222,6 +1279,12 @@ class VDP : IDisposable
             return;
         }
 
+        if (target.format != VDPTextureFormat.RGBA8888)
+        {
+            Console.WriteLine("Attempted to copy framebuffer to texture with invalid format: " + handle);
+            return;
+        }
+
         FlushRenderPass();
         SDL.SDL_BlitGPUTexture(_activeCmdBuf, new SDL.SDL_GPUBlitInfo() {
             source = new SDL.SDL_GPUBlitRegion() {
@@ -1233,10 +1296,10 @@ class VDP : IDisposable
             },
             destination = new SDL.SDL_GPUBlitRegion() {
                 texture = target.texture.handle,
-                x = (uint)srcRect.x,
-                y = (uint)srcRect.y,
-                w = (uint)srcRect.w,
-                h = (uint)srcRect.h
+                x = (uint)dstRect.x,
+                y = (uint)dstRect.y,
+                w = (uint)dstRect.w,
+                h = (uint)dstRect.h
             },
             load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
             cycle = false,
@@ -1259,19 +1322,76 @@ class VDP : IDisposable
 
     public void SetTextureDataYUV(int handle, Span<byte> yData, Span<byte> uData, Span<byte> vData)
     {
-        throw new NotImplementedException();
+        if (handle < 0 || handle >= _texCache.Count)
+        {
+            Console.WriteLine("Attempted to upload data to invalid texture handle: " + handle);
+            return;
+        }
+
+        if (_texCache[handle] is VdpTexture texture && texture.format == VDPTextureFormat.YUV420)
+        {
+            // ensure there's enough space in the buffer
+            if (_yuvBuffer.byteLength < yData.Length + uData.Length + vData.Length)
+            {
+                _yuvBuffer.Dispose();
+                _yuvBuffer = new GraphicsBuffer(_graphicsDevice, yData.Length + uData.Length + vData.Length, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+            }
+
+            // check if we need to end current render pass & start new copy pass
+            CheckCopyPass();
+
+            // copy data into buffer
+            _yuvBuffer.SetData(_activeCopyPass, yData, 0, true);
+            _yuvBuffer.SetData(_activeCopyPass, uData, yData.Length, false);
+            _yuvBuffer.SetData(_activeCopyPass, vData, yData.Length + uData.Length, false);
+
+            FlushCopyPass();
+
+            nint computePass = SDL.SDL_BeginGPUComputePass(_activeCmdBuf, [
+                new SDL.SDL_GPUStorageTextureReadWriteBinding() {
+                    texture = texture.texture.handle,
+                    mip_level = 0,
+                    layer = 0,
+                    cycle = true
+                }
+            ], 1, [], 0);
+
+            SDL.SDL_BindGPUComputePipeline(computePass, _convertYuvPipeline.handle);
+
+            SDL.SDL_BindGPUComputeStorageBuffers(computePass, 0, [_yuvBuffer.handle], 1);
+
+            ConvertYUVParams p = new ConvertYUVParams() {
+                imgWidth = (uint)texture.texture.width,
+                imgHeight = (uint)texture.texture.height
+            };
+
+            unsafe
+            {
+                ConvertYUVParams* pPtr = &p;
+                SDL.SDL_PushGPUComputeUniformData(_activeCmdBuf, 0, (nint)pPtr, (uint)Unsafe.SizeOf<ConvertYUVParams>());
+            }
+
+            // invoke compute shader
+            SDL.SDL_DispatchGPUCompute(computePass, 1, 1, 1);
+
+            // done
+            SDL.SDL_EndGPUComputePass(computePass);
+        }
+        else
+        {
+            Console.WriteLine("Attempted to upload data to invalid texture handle: " + handle);
+        }
     }
 
     // NOTE: currently depth query is not available in SDL3 GPU and is not planned as far as I'm aware
     // Skipping it for now, eventually I may see if I can implement it with a compute pass if people actually need it
-    public void SubmitDepthQuery(float refVal, VDPCompare compare, SDL.SDL_Rect rect)
+    public void SubmitDepthQuery(float _refVal, VDPCompare _compare, SDL.SDL_Rect _rect)
     {
-        throw new NotImplementedException();
     }
 
     public int GetDepthQueryResult()
     {
-        throw new NotImplementedException();
+        return 0;
     }
 
     public void SetRenderTarget(int handle)
@@ -1385,7 +1505,7 @@ class VDP : IDisposable
         var prg = new VUProgram();
         program.CopyTo(prg[0..64]);
 
-        _vu_program_data = prg;
+        _vu_programData = prg;
     }
 
     public void SubmitVU(VDPTopology topology, Span<byte> data)
@@ -1415,7 +1535,7 @@ class VDP : IDisposable
                 vtxCombine = (uint)_vtxCombine
             },
             cdata = _vu_cdata,
-            program = _vu_program_data,
+            program = _vu_programData,
         });
 
         _needsNewPipeline = false;
@@ -1423,7 +1543,7 @@ class VDP : IDisposable
         _needsNewRenderPass = false;
         _clearColor = null;
         _clearDepth = null;
-        _vu_program_data = null;
+        _vu_programData = null;
     }
 
     public void EndFrame(out int numSkipFrames)
@@ -1433,6 +1553,8 @@ class VDP : IDisposable
 
         // TODO: use vertex cycles instead of number of vertices
         numSkipFrames = _totalVerticesThisFrame / VERTICES_PER_FRAME;
+
+        SDL.SDL_PopGPUDebugGroup(_activeCmdBuf);
     }
 
     public void BlitToScreen(nint renderPass, float widthScale, float heightScale)
@@ -1480,6 +1602,9 @@ class VDP : IDisposable
         _pipelineCache.Clear();
 
         _blitQuad.Dispose();
+
+        _convertYuvPipeline.Dispose();
+        _yuvBuffer.Dispose();
 
         _vu_data.Dispose();
         _vu_program.Dispose();

@@ -225,11 +225,14 @@ class DreamboxApp
             // draw a frame
             if (swapchainTex != 0)
             {
-                while (frameAccum >= frameInterval)
+                if (frameAccum >= frameInterval)
                 {
+                    int numFrames = (int)(frameAccum / frameInterval);
+
                     if (!_paused) {
                         if (skipFrames > 0) {
-                            skipFrames--;
+                            skipFrames -= numFrames;
+                            if (skipFrames < 0) skipFrames = 0;
                         }
                         else {
                             _vdp.BeginFrame(cmdBuf);
@@ -241,7 +244,7 @@ class DreamboxApp
                         }
                     }
 
-                    frameAccum -= frameInterval;
+                    frameAccum -= numFrames * frameInterval;
                 }
 
                 var finalPass = SDL.SDL_BeginGPURenderPass(cmdBuf, [new ()
