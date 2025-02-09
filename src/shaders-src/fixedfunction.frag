@@ -30,8 +30,7 @@ vec4 combine(vec4 a, vec4 b, uint op) {
         case TC_SUB: return a - b;
         case TC_MIX: return mix(a, b, b.w);
         case TC_DOT3: {
-            float d = dot(a.xyz, b.xyz);
-            return vec4(d, d, d, 1.0);
+            return dot(a.xyz * 2.0 - 1.0, b.xyz * 2.0 - 1.0).xxxx;
         }
     }
 }
