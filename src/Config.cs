@@ -13,6 +13,12 @@ public enum DreamboxVideoMode
     SVideo,
 }
 
+public enum DreamboxDiscDriver
+{
+    ISO,
+    CD,
+}
+
 struct GamepadSettings(string? deviceName)
 {
     [JsonPropertyName("deviceName")] public string? DeviceName { get; set; } = deviceName;
@@ -29,6 +35,8 @@ class DreamboxConfig
     [JsonPropertyName("disableFrameskips")] public bool DisableFrameskips { get; set; } = false;
     [JsonPropertyName("fullscreen")] public bool Fullscreen { get; set; } = false;
     [JsonPropertyName("hideMenu")] public bool HideMenu { get; set; } = false;
+    [JsonPropertyName("skipBios")] public bool SkipBIOS { get; set; } = false;
+    [JsonPropertyName("defaultDiscDriver")] public DreamboxDiscDriver DefaultDiscDriver { get; set; } = DreamboxDiscDriver.ISO;
     [JsonPropertyName("recentGames")] public List<string> RecentGames { get; set; } = [];
     [JsonPropertyName("gamepads")] public GamepadSettings[] Gamepads { get; set; } = [ new ("Keyboard"), new (null), new (null), new (null) ];
 

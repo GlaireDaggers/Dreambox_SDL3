@@ -5,8 +5,12 @@ using System.Runtime.CompilerServices;
 using SDL3;
 using Wasmtime;
 
+public delegate void VMLogOutputHandler(string message);
+
 class Runtime : IDisposable
 {
+    public static event VMLogOutputHandler? OnLogOutput;
+
     private const int TOTAL_MEM = 256;
 
     private struct clock_dateTime
@@ -57,7 +61,37 @@ class Runtime : IDisposable
 
     private Module? _queueLoadModule = null;
 
-    public Runtime(Span<byte> wasmBytes, DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
+    #if !FORCE_PRECOMPILED_RUNTIME
+    public static Runtime CreateWasmRuntime(Span<byte> moduleBytes, DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
+    {
+        Config wasmConfig = new Config()
+            .WithWasmThreads(true)
+            .WithBulkMemory(true)
+            .WithSIMD(true)
+            .WithRelaxedSIMD(true, false)
+            .WithOptimizationLevel(debug ? OptimizationLevel.None : OptimizationLevel.Speed)
+            .WithDebugInfo(debug);
+        
+        var engine = new Engine(wasmConfig);
+        return new Runtime(engine, Module.FromBytes(engine, "main", moduleBytes), config, disk, mca, mcb, vdp, audioSystem, inputSystem, debug);
+    }
+    #endif
+
+    public static Runtime CreatePrecompiledRuntime(Span<byte> moduleBytes, DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
+    {
+        Config wasmConfig = new Config()
+            .WithWasmThreads(true)
+            .WithBulkMemory(true)
+            .WithSIMD(true)
+            .WithRelaxedSIMD(true, false)
+            .WithOptimizationLevel(debug ? OptimizationLevel.None : OptimizationLevel.Speed)
+            .WithDebugInfo(debug);
+        
+        var engine = new Engine(wasmConfig);
+        return new Runtime(engine, Module.Deserialize(engine, "main", moduleBytes), config, disk, mca, mcb, vdp, audioSystem, inputSystem, debug);
+    }
+
+    public Runtime(Engine engine, Module module, DreamboxConfig config, IDiskDriver disk, MemoryCard mca, MemoryCard mcb, VDP vdp, AudioSystem audioSystem, InputSystem inputSystem, bool debug = false)
     {
         _config = config;
         
@@ -68,15 +102,7 @@ class Runtime : IDisposable
         _audioSystem = audioSystem;
         _inputSystem = inputSystem;
 
-        Config wasmConfig = new Config()
-            .WithWasmThreads(true)
-            .WithBulkMemory(true)
-            .WithSIMD(true)
-            .WithRelaxedSIMD(true, false)
-            .WithOptimizationLevel(debug ? OptimizationLevel.None : OptimizationLevel.Speed)
-            .WithDebugInfo(debug);
-        
-        engine = new Engine(wasmConfig);
+        this.engine = engine;
         
         _linker = new Linker(engine);
         _store = new Store(engine);
@@ -174,7 +200,7 @@ class Runtime : IDisposable
         _linker.DefineFunction<int, int, int>("env", "emscripten_memcpy_big", emscripten_memcpy_big);
         _linker.DefineFunction<int, int>("env", "emscripten_resize_heap", emscripten_resize_heap);
 
-        LoadModule(wasmBytes);
+        _queueLoadModule = module;
     }
 
     public void Dispose()
@@ -185,9 +211,13 @@ class Runtime : IDisposable
         }
     }
 
-    public void LoadModule(Span<byte> wasmData)
+    public void LoadWasmModule(Span<byte> wasmData)
     {
+    #if FORCE_PRECOMPILED_RUNTIME
+        throw new NotImplementedException();
+    #else
         _queueLoadModule = Module.FromBytes(engine, "main", wasmData);
+    #endif
     }
 
     public void Tick()
@@ -919,6 +949,8 @@ class Runtime : IDisposable
     {
         string msg = memory!.ReadNullTerminatedString(ptr);
         Console.WriteLine("[DBG] " + msg);
+
+        OnLogOutput?.Invoke(msg);
     }
 
     private void vdp_clearColor(int colorPtr)
@@ -1240,7 +1272,7 @@ class Runtime : IDisposable
     private void bios_loadProgram(int codePtr, int codeLen)
     {
         var programData = GetSpan<byte>(codePtr, codeLen).ToArray();
-        LoadModule(programData);
+        LoadWasmModule(programData);
     }
 
     private void bios_getPrefLang(int outLangStr)

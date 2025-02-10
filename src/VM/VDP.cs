@@ -133,7 +133,7 @@ public struct VDPVertexSlot
     public VDPVertexSlotFormat format;
 }
 
-[InlineArray(8)]
+[InlineArray(VDP.NUM_VU_VERTEX_SLOTS)]
 public struct VDPVertexLayout : IEquatable<VDPVertexLayout>
 {
     public VDPVertexSlot slot0;
@@ -177,13 +177,13 @@ public struct VDPVertexLayout : IEquatable<VDPVertexLayout>
     }
 }
 
-[InlineArray(16)]
+[InlineArray(VDP.NUM_VU_CONSTANTS)]
 public struct VUCData
 {
     public Vector4 slot;
 }
 
-[InlineArray(64)]
+[InlineArray(VDP.MAX_VU_PROGRAM_SIZE)]
 public struct VUProgram
 {
     public uint instr;
@@ -239,13 +239,161 @@ public struct PackedVertex : IVertex
     }
 }
 
+struct VdpTextureHandle
+{
+    public int handle;
+    public VdpTexture texture;
+}
+
+class VdpTexture : IDisposable
+{
+    public virtual int sizeBytes => CalcTextureTotalSize(format, texture.width, texture.height, texture.levels);
+
+    public readonly VDPTextureFormat format;
+    public Texture texture;
+
+    public VdpTexture(VDPTextureFormat format, Texture texture)
+    {
+        this.format = format;
+        this.texture = texture;
+    }
+
+    public virtual void SetData<T>(nint copyPass, nint cmdBuf, int level, SDL.SDL_Rect? rect, Span<T> data)
+        where T : unmanaged
+    {
+        if (format == VDPTextureFormat.YUV420)
+        {
+            Console.WriteLine("Tried to SetTextureData on YUV texture (use SetTextureDataYUV instead)");
+            return;
+        }
+
+        int levelW = texture.width >> level;
+        int levelH = texture.height >> level;
+
+        if (levelW < 1) levelW = 1;
+        if (levelH < 1) levelH = 1;
+
+        texture.SetData(copyPass, cmdBuf, data, level, 0, rect?.x ?? 0, rect?.y ?? 0, 0, rect?.w ?? levelW, rect?.h ?? levelH, 1, false);
+    }
+
+    public virtual void Dispose()
+    {
+        this.texture.Dispose();
+    }
+
+    public static int CalcDepthTextureTotalSize(int width, int height, int levelCount)
+    {
+        int totalSize = 0;
+
+        for (int i = 0; i < levelCount; i++)
+        {
+            totalSize += CalcDepthTextureLevelSize(width, height);
+            width >>= 1;
+            height >>= 1;
+        }
+
+        return totalSize;
+    }
+
+    public static int CalcDepthTextureLevelSize(int width, int height)
+    {
+        return width * height * 4;
+    }
+
+    public static int GetTotalLevelCount(int width, int height)
+    {
+        int levels = 1;
+        for (
+            int size = Math.Max(width, height);
+            size > 1;
+            levels += 1
+        )
+        {
+            size /= 2;
+        }
+        return levels;
+    }
+
+    public static int CalcTextureTotalSize(VDPTextureFormat format, int width, int height, int levelCount)
+    {
+        int totalSize = 0;
+
+        for (int i = 0; i < levelCount; i++)
+        {
+            totalSize += CalcTextureLevelSize(format, width, height);
+            width >>= 1;
+            height >>= 1;
+        }
+
+        return totalSize;
+    }
+
+    public static int CalcTextureLevelSize(VDPTextureFormat format, int width, int height)
+    {
+        switch (format) {
+            case VDPTextureFormat.RGB565:
+            case VDPTextureFormat.RGBA4444:
+                return width * height * 2;
+            case VDPTextureFormat.RGBA8888:
+                return width * height * 4;
+            case VDPTextureFormat.DXT1:
+                {
+                    // DXT1 encodes each 4x4 block of input pixels into 64 bits of output
+                    int blockCount = (width * height) / 16;
+                    return blockCount * 8;
+                }
+            case VDPTextureFormat.DXT3:
+                {
+                    // DXT3 encodes each 4x4 block of input pixels into 128 bits of output
+                    int blockCount = (width * height) / 16;
+                    return blockCount * 16;
+                }
+            case VDPTextureFormat.YUV420:
+                {
+                    // planar format - one full-size luma plane, two half-size chroma planes
+                    // one byte per pixel per plane
+                    int fullsize = width * height;
+                    int halfsize = (width / 2) * (height / 2);
+
+                    return fullsize + (halfsize * 2);        
+                }
+        }
+
+        throw new NotImplementedException();
+    }
+}
+
+class VdpRenderTexture : VdpTexture
+{
+    public override int sizeBytes => CalcTextureTotalSize(format, texture.width, texture.height, texture.levels);
+
+    public Texture depthTexture;
+
+    public VdpRenderTexture(VDPTextureFormat format, Texture texture, Texture depthTexture) : base(format, texture)
+    {
+        this.depthTexture = depthTexture;
+    }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        this.depthTexture.Dispose();
+    }
+}
+
 class VDP : IDisposable
 {
-    public const int VERTICES_PER_FRAME = 50000; // number of vertices you can submit per frame in order to maintain 60Hz refresh rate (~3m per second)
+    // number of VU cycles you can spend per frame in order to maintain 60Hz refresh rate (~3m per second)
+    // note: currently tuned for being able to draw 150K vertices per frame (50K triangles * 3 vertices per triangle) with a 16-instruction VU program
+    public const int VU_CYCLES_PER_FRAME = 150000 * 16;
+
     public const int SCREEN_WIDTH = 640;
     public const int SCREEN_HEIGHT = 480;
 
     public const int MAX_TEXTURE_MEM = 8388608; // 8MiB of texture memory available
+    public const int MAX_VU_PROGRAM_SIZE = 64;  // maximum number of instructions per VU program
+    public const int NUM_VU_CONSTANTS = 16;     // number of constant slots available to VU
+    public const int NUM_VU_VERTEX_SLOTS = 8;   // number of input vertex slots available to VU
 
     private static readonly Dictionary<VDPBlendEquation, SDL.SDL_GPUBlendOp> BLEND_OP_TO_SDL = new () {
         { VDPBlendEquation.ADD, SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD },
@@ -305,61 +453,6 @@ class VDP : IDisposable
         // bit of a special case (technically it's just an RGBA8 texture, but uses a compute shader to convert YUV)
         { VDPTextureFormat.YUV420, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM },
     };
-
-    class VdpTexture : IDisposable
-    {
-        public virtual int sizeBytes => calcTextureTotalSize(format, texture.width, texture.height, texture.levels);
-
-        public readonly VDPTextureFormat format;
-        public Texture texture;
-
-        public VdpTexture(VDPTextureFormat format, Texture texture)
-        {
-            this.format = format;
-            this.texture = texture;
-        }
-
-        public virtual void SetData<T>(nint copyPass, nint cmdBuf, int level, SDL.SDL_Rect? rect, Span<T> data)
-            where T : unmanaged
-        {
-            if (format == VDPTextureFormat.YUV420)
-            {
-                Console.WriteLine("Tried to SetTextureData on YUV texture (use SetTextureDataYUV instead)");
-                return;
-            }
-
-            int levelW = texture.width >> level;
-            int levelH = texture.height >> level;
-
-            if (levelW < 1) levelW = 1;
-            if (levelH < 1) levelH = 1;
-
-            texture.SetData(copyPass, cmdBuf, data, level, 0, rect?.x ?? 0, rect?.y ?? 0, 0, rect?.w ?? levelW, rect?.h ?? levelH, 1, false);
-        }
-
-        public virtual void Dispose()
-        {
-            this.texture.Dispose();
-        }
-    }
-
-    class VdpRenderTexture : VdpTexture
-    {
-        public override int sizeBytes => calcTextureTotalSize(format, texture.width, texture.height, texture.levels);
-
-        public Texture depthTexture;
-
-        public VdpRenderTexture(VDPTextureFormat format, Texture texture, Texture depthTexture) : base(format, texture)
-        {
-            this.depthTexture = depthTexture;
-        }
-
-        public override void Dispose()
-        {
-            base.Dispose();
-            this.depthTexture.Dispose();
-        }
-    }
 
     struct BlitVertex : IVertex
     {
@@ -497,6 +590,7 @@ class VDP : IDisposable
         public FFParams ffParams;
         public VUCData cdata;
         public VUProgram? program;
+        public int vuCost;
     }
 
     public int TextureMemoryUsage => _totalTexMem;
@@ -575,15 +669,18 @@ class VDP : IDisposable
     private GraphicsBuffer _vu_program;
     private GraphicsBuffer _vu_data;
 
-    private int _totalVerticesThisFrame = 0;
+    private int _totalVuCostThisFrame = 0;
 
     private VUCData _vu_cdata;
     private VUProgram? _vu_programData;
+    private int _vu_programCost;
 
     private ComputePipeline _convertYuvPipeline;
     private GraphicsBuffer _yuvBuffer;
 
     private uint _frameCount;
+
+    private bool _wireframeMode = false;
 
     public VDP(GraphicsDevice graphicsDevice)
     {
@@ -657,7 +754,7 @@ class VDP : IDisposable
         SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _blitQuad.handle, nameof(_blitQuad));
 
         // enough space to fit 64 VU instructions (32 bits per instruction)
-        _vu_program = new GraphicsBuffer(graphicsDevice, 256, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        _vu_program = new GraphicsBuffer(graphicsDevice, 4 * MAX_VU_PROGRAM_SIZE, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
 
         // note: will be resized as needed
         _vu_data = new GraphicsBuffer(graphicsDevice, 1024 * 3 * Unsafe.SizeOf<PackedVertex>(), SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX);
@@ -732,6 +829,18 @@ class VDP : IDisposable
         SDL.SDL_SubmitGPUCommandBuffer(cmdBuf);
     }
 
+    public void SetWireframe(bool enabled)
+    {
+        _wireframeMode = enabled;
+
+        // flush the pipeline cache to force pipelines to be rebuilt with new fill mode
+        foreach (var kvp in _pipelineCache)
+        {
+            kvp.Value.Dispose();
+        }
+        _pipelineCache.Clear();
+    }
+
     private Shader LoadShader(GraphicsDevice device, string path, SDL.SDL_GPUShaderStage stage,
         int numSamplers, int numStorageBuffers, int numUniformBuffers)
     {
@@ -759,9 +868,7 @@ class VDP : IDisposable
 
         while (_drawQueue.TryDequeue(out var cmd))
         {
-            // TODO: compute "cycle cost" based on length of VU program
-            int vtxCount = cmd.bufferLength / cmd.psoSettings.vuStride;
-            _totalVerticesThisFrame += vtxCount;
+            _totalVuCostThisFrame += cmd.vuCost;
 
             // this draw requires a new vertex program to be copied into the buffer
             if (cmd.program != null)
@@ -770,7 +877,7 @@ class VDP : IDisposable
                 copyPass = SDL.SDL_BeginGPUCopyPass(_activeCmdBuf);
 
                 var prg = cmd.program.Value;
-                _vu_program.SetData(copyPass, prg[0..64], 0, true);
+                _vu_program.SetData(copyPass, prg[0..MAX_VU_PROGRAM_SIZE], 0, true);
 
                 SDL.SDL_EndGPUCopyPass(copyPass);
             }
@@ -826,6 +933,7 @@ class VDP : IDisposable
                 SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)ffParams_ptr, (uint)Unsafe.SizeOf<FFParams>());
             }
 
+            int vtxCount = cmd.bufferLength / cmd.psoSettings.vuStride;
             SDL.SDL_DrawGPUPrimitives(_activeRenderPass, (uint)vtxCount, 1, 0, 0);
         }
     }
@@ -995,7 +1103,7 @@ class VDP : IDisposable
             vtxDesc, vtxAttr,
             TOPOLOGY_TO_SDL[settings.topology],
             new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
+                fill_mode = _wireframeMode ? SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_LINE : SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
                 cull_mode = settings.culling ? SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_BACK : SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
                 front_face = settings.winding == VDPWindingOrder.CW ? SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE : SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
             },
@@ -1057,7 +1165,7 @@ class VDP : IDisposable
         _needsNewRenderPass = true;
         _needsNewTexture = true;
         _frameVUData.Clear();
-        _totalVerticesThisFrame = 0;
+        _totalVuCostThisFrame = 0;
 
         SDL.SDL_PushGPUDebugGroup(cmdBuf, $"VDP FRAME {_frameCount++}");
     }
@@ -1152,7 +1260,7 @@ class VDP : IDisposable
                 return -1;
             }
 
-            int totalSize = calcTextureTotalSize(format, width, height, 1);
+            int totalSize = VdpTexture.CalcTextureTotalSize(format, width, height, 1);
 
             if (_totalTexMem + totalSize >= MAX_TEXTURE_MEM)
             {
@@ -1177,8 +1285,8 @@ class VDP : IDisposable
                 return -1;
             }
 
-            int levelcount = mipmap ? getTotalLevelCount(width, height) : 1;
-            int totalSize = calcTextureTotalSize(format, width, height, levelcount);
+            int levelcount = mipmap ? VdpTexture.GetTotalLevelCount(width, height) : 1;
+            int totalSize = VdpTexture.CalcTextureTotalSize(format, width, height, levelcount);
 
             if (_totalTexMem + totalSize >= MAX_TEXTURE_MEM)
             {
@@ -1230,7 +1338,7 @@ class VDP : IDisposable
             return -1;
         }
 
-        int totalSize = calcTextureTotalSize(VDPTextureFormat.RGBA8888, width, height, 1) + calcDepthTextureTotalSize(width, height, 1);
+        int totalSize = VdpTexture.CalcTextureTotalSize(VDPTextureFormat.RGBA8888, width, height, 1) + VdpRenderTexture.CalcDepthTextureTotalSize(width, height, 1);
 
         if (_totalTexMem + totalSize >= MAX_TEXTURE_MEM)
         {
@@ -1522,9 +1630,21 @@ class VDP : IDisposable
     public void UploadVUProgram(Span<uint> program)
     {
         var prg = new VUProgram();
-        program.CopyTo(prg[0..64]);
+        program.CopyTo(prg[0..MAX_VU_PROGRAM_SIZE]);
 
         _vu_programData = prg;
+
+        // measure the cost of the VU program
+        _vu_programCost = MAX_VU_PROGRAM_SIZE;
+        for (int i = 0; i < program.Length; i++)
+        {
+            uint op = program[i] & 0xF;
+            if (op == 15)
+            {
+                _vu_programCost = i + 1;
+                break;
+            }
+        }
     }
 
     public void SubmitVU(VDPTopology topology, Span<byte> data)
@@ -1535,6 +1655,8 @@ class VDP : IDisposable
         int bufferLen = data.Length;
 
         _frameVUData.AddRange(data);
+
+        int numVertices = bufferLen / _drawSettings.vuStride;
 
         // queue draw command
         _drawQueue.Enqueue(new VUDrawCmd() {
@@ -1557,6 +1679,7 @@ class VDP : IDisposable
             },
             cdata = _vu_cdata,
             program = _vu_programData,
+            vuCost = _vu_programCost * numVertices,
         });
 
         _needsNewPipeline = false;
@@ -1578,8 +1701,7 @@ class VDP : IDisposable
             res.Dispose();
         }
 
-        // TODO: use vertex cycles instead of number of vertices
-        numSkipFrames = _totalVerticesThisFrame / VERTICES_PER_FRAME;
+        numSkipFrames = _totalVuCostThisFrame / VU_CYCLES_PER_FRAME;
 
         SDL.SDL_PopGPUDebugGroup(_activeCmdBuf);
     }
@@ -1604,6 +1726,21 @@ class VDP : IDisposable
 
         // draw quad
         SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
+    }
+
+    public void GetTextures(List<VdpTextureHandle> outTextures)
+    {
+        for (int i = 0; i < _texCache.Count; i++)
+        {
+            var tex = _texCache[i];
+            if (tex != null)
+            {
+                outTextures.Add(new VdpTextureHandle() {
+                    handle = i,
+                    texture = tex
+                });
+            }
+        }
     }
     
     public void Dispose()
@@ -1645,87 +1782,6 @@ class VDP : IDisposable
         _blit_fragment.Dispose();
         _vu_vertex.Dispose();
         _ff_fragment.Dispose();
-    }
-    
-    private static int getTotalLevelCount(int width, int height)
-    {
-        int levels = 1;
-        for (
-            int size = Math.Max(width, height);
-            size > 1;
-            levels += 1
-        )
-        {
-            size /= 2;
-        }
-        return levels;
-    }
-
-    private static int calcTextureTotalSize(VDPTextureFormat format, int width, int height, int levelCount)
-    {
-        int totalSize = 0;
-
-        for (int i = 0; i < levelCount; i++)
-        {
-            totalSize += calcTextureLevelSize(format, width, height);
-            width >>= 1;
-            height >>= 1;
-        }
-
-        return totalSize;
-    }
-
-    private static int calcTextureLevelSize(VDPTextureFormat format, int width, int height)
-    {
-        switch (format) {
-            case VDPTextureFormat.RGB565:
-            case VDPTextureFormat.RGBA4444:
-                return width * height * 2;
-            case VDPTextureFormat.RGBA8888:
-                return width * height * 4;
-            case VDPTextureFormat.DXT1:
-                {
-                    // DXT1 encodes each 4x4 block of input pixels into 64 bits of output
-                    int blockCount = (width * height) / 16;
-                    return blockCount * 8;
-                }
-            case VDPTextureFormat.DXT3:
-                {
-                    // DXT3 encodes each 4x4 block of input pixels into 128 bits of output
-                    int blockCount = (width * height) / 16;
-                    return blockCount * 16;
-                }
-            case VDPTextureFormat.YUV420:
-                {
-                    // planar format - one full-size luma plane, two half-size chroma planes
-                    // one byte per pixel per plane
-                    int fullsize = width * height;
-                    int halfsize = (width / 2) * (height / 2);
-
-                    return fullsize + (halfsize * 2);        
-                }
-        }
-
-        throw new NotImplementedException();
-    }
-
-    private static int calcDepthTextureTotalSize(int width, int height, int levelCount)
-    {
-        int totalSize = 0;
-
-        for (int i = 0; i < levelCount; i++)
-        {
-            totalSize += calcDepthTextureLevelSize(width, height);
-            width >>= 1;
-            height >>= 1;
-        }
-
-        return totalSize;
-    }
-
-    private static int calcDepthTextureLevelSize(int width, int height)
-    {
-        return width * height * 4;
     }
 
     private static uint EncodeVUInstr(ushort opcode, ushort d, ushort s, ushort sx = 0, ushort sy = 0, ushort sz = 0, ushort sw = 0, ushort m = 0)

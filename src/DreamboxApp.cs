@@ -59,6 +59,9 @@ class DreamboxApp
         _instance!._paused = false;
     }
 
+    public VDP VdpInstance => _vdp;
+    public AudioSystem AudioSystemInstance => _audioSys;
+
     private readonly DreamboxConfig _config;
     private readonly nint _window;
     private readonly GraphicsDevice _graphicsDevice;
@@ -82,6 +85,8 @@ class DreamboxApp
 
     private DiskDriverWrapper _disk;
     private IDiskDriver? _queueLoadDisk = null;
+
+    private bool _debugWireframe = false;
 
     public DreamboxApp(bool debug)
     {
@@ -123,7 +128,24 @@ class DreamboxApp
         _inputSys = new InputSystem(_config);
 
         _disk = new DiskDriverWrapper();
-        _disk.internalDriver = new ISODiskDriver();
+
+        if (_config.DefaultDiscDriver == DreamboxDiscDriver.CD)
+        {
+            _disk.internalDriver = CreateCDDriver();
+        }
+        else if (_config.DefaultDiscDriver == DreamboxDiscDriver.ISO)
+        {
+            _disk.internalDriver = new ISODiskDriver();
+        }
+        else
+        {
+            Console.WriteLine("Invalid CD driver (falling back to ISO driver)");
+            _disk.internalDriver = new ISODiskDriver();
+        }
+
+    #if ENABLE_STANDALONE_MODE
+        _disk.internalDriver.Insert(File.OpenRead("content/game.iso"));
+    #endif
 
         _mca = new MemoryCard(PathUtils.GetPath("memcard_a.sav"));
         _mcb = new MemoryCard(PathUtils.GetPath("memcard_b.sav"));
@@ -139,6 +161,7 @@ class DreamboxApp
             }
         }
 
+        DebugOutputWindow.StartLogCapture();
         _vm = InitVM();
     }
 
@@ -171,6 +194,11 @@ class DreamboxApp
                 {
                     _disk.internalDriver = _queueLoadDisk;
                     _queueLoadDisk = null;
+
+                    if (_config.SkipBIOS)
+                    {
+                        ResetVM();   
+                    }
                 }
             }
 
@@ -237,9 +265,7 @@ class DreamboxApp
                         else
                         {
                             _vdp.BeginFrame(cmdBuf);
-                            {
-                                _vm?.Tick();
-                            }
+                            _vm.Tick();
                             _vdp.EndFrame(out var vdpSkips);
                             skipFrames += vdpSkips;
                         }
@@ -276,6 +302,7 @@ class DreamboxApp
 
                 _vdp.BlitToScreen(finalPass, wScale, hScale);
 
+            #if !ENABLE_STANDALONE_MODE
                 // draw ImGui
                 if (!_config.HideMenu)
                 {
@@ -285,6 +312,7 @@ class DreamboxApp
                     }
                     _imGuiRenderer.AfterLayout(cmdBuf, finalPass, swapchainWidth, swapchainHeight);
                 }
+            #endif
 
                 SDL.SDL_EndGPURenderPass(finalPass);
 
@@ -314,9 +342,77 @@ class DreamboxApp
 
     private Runtime InitVM()
     {
+    #if FORCE_PRECOMPILED_RUNTIME
+        // init game VM
+        return InitGameVM();
+    #else
+        if (_config.SkipBIOS && _disk.Inserted())
+        {
+            return InitGameVM();
+        }
+        else
+        {
+            return InitBIOSVM();
+        }
+    #endif
+    }
+
+    private void ResetVM()
+    {
+        _vm.Dispose();
+        _vdp.Dispose();
+        _audioSys.Dispose();
+        
+        _vdp = new VDP(_graphicsDevice);
+        _audioSys = new AudioSystem();
+
+        _vdp.SetWireframe(_debugWireframe);
+
+        _vm = InitVM();
+    }
+
+    private Runtime InitBIOSVM()
+    {
+    #if FORCE_PRECOMPILED_RUNTIME
+        throw new NotImplementedException();
+    #else
         // init VM with BIOS
         byte[] bios = File.ReadAllBytes("content/bios.wasm");
-        return new Runtime(bios, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+        return Runtime.CreateWasmRuntime(bios, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+    #endif
+    }
+
+    private Runtime InitGameVM()
+    {
+    #if FORCE_PRECOMPILED_RUNTIME
+        // load precompiled binary
+        byte[] moduleBytes = File.ReadAllBytes("content/runtime.cwasm");
+        return Runtime.CreatePrecompiledRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+    #else
+        // load game binary from disk & init VM
+        byte[] moduleBytes;
+        using (var execStream = _disk.OpenRead("main.wasm"))
+        using (var memStream = new MemoryStream())
+        {
+            execStream.CopyTo(memStream);
+            moduleBytes = memStream.ToArray();
+        }
+        return Runtime.CreateWasmRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+    #endif
+    }
+
+    private IDiskDriver CreateCDDriver()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return new WindowsCDDiskDriver();
+        }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return new LinuxCDDiskDriver();
+        }
+
+        throw new NotImplementedException();
     }
 
     private unsafe void DrawUI(ref bool quit)
@@ -337,14 +433,7 @@ class DreamboxApp
                 }
                 if (ImGui.MenuItem("Enable CD/DVD Driver"))
                 {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        _queueLoadDisk = new WindowsCDDiskDriver();
-                    }
-                    else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                    {
-                        _queueLoadDisk = new LinuxCDDiskDriver();
-                    }
+                    _queueLoadDisk = CreateCDDriver();
                 }
                 if (ImGui.MenuItem("Eject Game Disc"))
                 {
@@ -352,12 +441,7 @@ class DreamboxApp
                 }
                 if (ImGui.MenuItem("Reset"))
                 {
-                    _vm.Dispose();
-                    _vdp.Dispose();
-                    _audioSys.Dispose();
-                    _vdp = new VDP(_graphicsDevice);
-                    _audioSys = new AudioSystem();
-                    _vm = InitVM();
+                    ResetVM();
                 }
                 if (_config.RecentGames.Count == 0)
                 {
@@ -374,7 +458,6 @@ class DreamboxApp
                             var game = _config.RecentGames[i];
                             if (ImGui.MenuItem(game))
                             {
-                                // todo
                                 var disk = new ISODiskDriver();
                                 disk.Insert(File.OpenRead(game));
 
@@ -397,6 +480,10 @@ class DreamboxApp
                 {
                     _config.DisableFrameskips = !_config.DisableFrameskips;
                 }
+                if (ImGui.MenuItem("Skip BIOS", "", _config.SkipBIOS))
+                {
+                    _config.SkipBIOS = !_config.SkipBIOS;
+                }
                 if (ImGui.MenuItem("Fullscreen", "", _config.Fullscreen))
                 {
                     _config.Fullscreen = !_config.Fullscreen;
@@ -407,6 +494,24 @@ class DreamboxApp
                 if (ImGui.MenuItem("Input"))
                 {
                     _windowStack.Add(new InputSettingsWindow(_config, _inputSys));
+                }
+                ImGui.EndMenu();
+            }
+            if (ImGui.BeginMenu("Debug"))
+            {
+                if (ImGui.MenuItem("Wireframe", "", _debugWireframe))
+                {
+                    _debugWireframe = !_debugWireframe;
+                    _vdp.SetWireframe(_debugWireframe);
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Debug Output"))
+                {
+                    _windowStack.Add(new DebugOutputWindow());
+                }
+                if (ImGui.MenuItem("Texture Viewer"))
+                {
+                    _windowStack.Add(new TextureViewerWindow(this, _imGuiRenderer));
                 }
                 ImGui.EndMenu();
             }
