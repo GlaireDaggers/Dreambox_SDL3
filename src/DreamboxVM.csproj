@@ -27,7 +27,7 @@
     <!-- When defined, Dreambox will always skip the BIOS, & will load a precompiled "runtime.cwasm" from the content folder instead of loading & compiling "main.wasm" from the game disk -->
     <!-- <DefineConstants>$(DefineConstants);FORCE_PRECOMPILED_RUNTIME</DefineConstants> -->
 
-    <!-- Use to enable "standalone" mode for games (disables built-in menu, & skips the BIOS to load straight into "game.iso" stored in the content folder) -->
+    <!-- Use to enable "standalone" mode for games (disables built-in menu, & automatically loads a "game.iso" stored in the content folder) -->
     <!-- <DefineConstants>$(DefineConstants);ENABLE_STANDALONE_MODE</DefineConstants> -->
   </PropertyGroup>
 
