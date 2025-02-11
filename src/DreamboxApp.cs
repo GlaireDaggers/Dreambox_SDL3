@@ -476,6 +476,10 @@ class DreamboxApp
             }
             if (ImGui.BeginMenu("Settings"))
             {
+                if (ImGui.MenuItem("Hide Menu", "F12", _config.HideMenu))
+                {
+                    _config.HideMenu = !_config.HideMenu;
+                }
                 if (ImGui.MenuItem("Disable Frameskips", "", _config.DisableFrameskips))
                 {
                     _config.DisableFrameskips = !_config.DisableFrameskips;
