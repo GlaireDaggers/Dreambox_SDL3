@@ -1755,7 +1755,7 @@ class VDP : IDisposable
             return;
         }
 
-        var screenTarget = CurrentScreenTarget();
+        var screenTarget = _drawSettings.target?.texture ?? CurrentScreenTarget();
 
         FlushRenderPass();
         SDL.SDL_BlitGPUTexture(_activeCmdBuf, new SDL.SDL_GPUBlitInfo() {
