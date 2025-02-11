@@ -1,9 +1,6 @@
 # Dreambox SDL3
 An SDL3 port of the Dreambox fantasy console runtime
 
-# What works, what doesn't?
-Just about everything works. Currently the only feature missing is depth queries - these were built on Occlusion Queries in the old FNA codebase, but the SDL3 GPU API does not support occlusion queries. For now attempting to start a query will do nothing, and attempting to retrieve query results will return 0.
-
 # Changes
 This port saves user data into a new folder compared to the old FNA version.
 
