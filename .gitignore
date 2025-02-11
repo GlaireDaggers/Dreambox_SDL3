@@ -1,5 +1,6 @@
 src/obj
 src/bin
+src/publish
 src/imgui.ini
 *.nettrace
 *.speedscope.json
