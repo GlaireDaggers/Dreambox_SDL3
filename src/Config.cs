@@ -13,6 +13,14 @@ public enum DreamboxVideoMode
     SVideo,
 }
 
+public enum DreamboxCrtPreset
+{
+    None,
+    Curve,
+    Flat,
+    Trinitron,
+}
+
 public enum DreamboxDiscDriver
 {
     ISO,
@@ -31,6 +39,8 @@ class DreamboxConfig
     [JsonPropertyName("lang")] public string Lang { get; set; } = "en";
     [JsonPropertyName("audioVolume")] public float AudioVolume { get; set; } = 1.0f;
     [JsonPropertyName("videoMode")] public DreamboxVideoMode VideoMode { get; set; } = DreamboxVideoMode.Default;
+    [JsonPropertyName("interlacedVideo")] public bool InterlacedVideo { get; set; } = false;
+    [JsonPropertyName("crtPreset")] public DreamboxCrtPreset CrtPreset { get; set; } = DreamboxCrtPreset.None;
     [JsonPropertyName("displayClock24Hr")] public bool DisplayClock24Hr { get; set; } = false;
     [JsonPropertyName("disableFrameskips")] public bool DisableFrameskips { get; set; } = false;
     [JsonPropertyName("fullscreen")] public bool Fullscreen { get; set; } = false;

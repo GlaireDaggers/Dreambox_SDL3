@@ -123,7 +123,7 @@ class DreamboxApp
         _imGuiRenderer.RebuildFontAtlas();
 
         // create VM components
-        _vdp = new VDP(_graphicsDevice);
+        _vdp = new VDP(_config, _graphicsDevice);
         _audioSys = new AudioSystem();
         _inputSys = new InputSystem(_config);
 
@@ -300,7 +300,7 @@ class DreamboxApp
                 float wScale = VDP.SCREEN_WIDTH * ratio / swapchainWidth;
                 float hScale = VDP.SCREEN_HEIGHT * ratio / swapchainHeight;
 
-                _vdp.BlitToScreen(finalPass, wScale, hScale);
+                _vdp.BlitToScreen(cmdBuf, finalPass, wScale, hScale);
 
             #if !ENABLE_STANDALONE_MODE
                 // draw ImGui
@@ -363,7 +363,7 @@ class DreamboxApp
         _vdp.Dispose();
         _audioSys.Dispose();
         
-        _vdp = new VDP(_graphicsDevice);
+        _vdp = new VDP(_config, _graphicsDevice);
         _audioSys = new AudioSystem();
 
         _vdp.SetWireframe(_debugWireframe);
@@ -489,6 +489,51 @@ class DreamboxApp
                     _config.Fullscreen = !_config.Fullscreen;
                     SDL.SDL_SetWindowFullscreen(_window, _config.Fullscreen);
                     SDL.SDL_SyncWindow(_window);
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Interlaced Video", "", _config.InterlacedVideo))
+                {
+                    _config.InterlacedVideo = !_config.InterlacedVideo;
+                }
+                if (ImGui.BeginMenu("Video Mode"))
+                {
+                    if (ImGui.MenuItem("Default", "", _config.VideoMode == DreamboxVideoMode.Default))
+                    {
+                        _config.VideoMode = DreamboxVideoMode.Default;
+                    }
+                    if (ImGui.MenuItem("VGA", "", _config.VideoMode == DreamboxVideoMode.VGA))
+                    {
+                        _config.VideoMode = DreamboxVideoMode.VGA;
+                    }
+                    if (ImGui.MenuItem("Composite", "", _config.VideoMode == DreamboxVideoMode.Composite))
+                    {
+                        _config.VideoMode = DreamboxVideoMode.Composite;
+                    }
+                    if (ImGui.MenuItem("S-Video", "", _config.VideoMode == DreamboxVideoMode.SVideo))
+                    {
+                        _config.VideoMode = DreamboxVideoMode.SVideo;
+                    }
+                    ImGui.EndMenu();
+                }
+                if (ImGui.BeginMenu("CRT Preset"))
+                {
+                    if (ImGui.MenuItem("None", "", _config.CrtPreset == DreamboxCrtPreset.None))
+                    {
+                        _config.CrtPreset = DreamboxCrtPreset.None;
+                    }
+                    if (ImGui.MenuItem("Curve", "", _config.CrtPreset == DreamboxCrtPreset.Curve))
+                    {
+                        _config.CrtPreset = DreamboxCrtPreset.Curve;
+                    }
+                    if (ImGui.MenuItem("Flat", "", _config.CrtPreset == DreamboxCrtPreset.Flat))
+                    {
+                        _config.CrtPreset = DreamboxCrtPreset.Flat;
+                    }
+                    if (ImGui.MenuItem("Trinitron", "", _config.CrtPreset == DreamboxCrtPreset.Trinitron))
+                    {
+                        _config.CrtPreset = DreamboxCrtPreset.Trinitron;
+                    }
+                    ImGui.EndMenu();
                 }
                 ImGui.Separator();
                 if (ImGui.MenuItem("Input"))
