@@ -15,3 +15,4 @@ mkdir -p ./content/shaders/
 ./tools/linux/glslc ./shaders-src/sharpen.frag -o ./content/shaders/sharpen.frag.spv
 
 ./tools/linux/glslc -fshader-stage=compute ./shaders-src/convert_yuv.glsl -o ./content/shaders/convert_yuv.spv
+./tools/linux/glslc -fshader-stage=compute ./shaders-src/depth_query.glsl -o ./content/shaders/depth_query.spv

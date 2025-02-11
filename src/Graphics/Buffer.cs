@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using NAudio.Wave.SampleProviders;
 using SDL3;
 
 namespace DreamboxVM.Graphics;
@@ -110,6 +111,40 @@ class GraphicsBuffer : GraphicsResource
         // upload to GPU
         SDL.SDL_UploadToGPUBuffer(copyPass, new SDL.SDL_GPUTransferBufferLocation() { transfer_buffer = _transferBuffer },
             new SDL.SDL_GPUBufferRegion() { buffer = handle, offset = (uint)offset, size = (uint)(Unsafe.SizeOf<TData>() * data.Length) }, cycleBuffer);
+    }
+
+    /// <summary>
+    /// Begin downloading a portion of this buffer from the GPU.
+    /// </summary>
+    /// <param name="copyPass">A copy pass that the download will happen within</param>
+    /// <param name="offset"></param>
+    /// <param name="length"></param>
+    public void GetData<TData>(nint copyPass, int offset, int length)
+        where TData : unmanaged
+    {
+        SDL.SDL_DownloadFromGPUBuffer(copyPass, new SDL.SDL_GPUBufferRegion() {
+            buffer = handle, offset = (uint)offset, size = (uint)(Unsafe.SizeOf<TData>() * length)
+        }, new SDL.SDL_GPUTransferBufferLocation() {
+            transfer_buffer = _transferBuffer
+        });
+    }
+
+    /// <summary>
+    /// Read data previously downloaded from the GPU via GetData. Note that GetData is not guaranteed to complete until the command buffer it was recorded to has signalled its fence.
+    /// </summary>
+    /// <param name="outData">Output span to read data into</param>
+    public void ReadData<TData>(Span<TData> outData)
+        where TData : unmanaged
+    {
+        unsafe
+        {
+            var transferPtr = (void*)SDL.SDL_MapGPUTransferBuffer(device.handle, _transferBuffer, true);
+            fixed (void* dst = outData)
+            {
+                Unsafe.CopyBlock(dst, transferPtr, (uint)(Unsafe.SizeOf<TData>() * outData.Length));
+            }
+            SDL.SDL_UnmapGPUTransferBuffer(device.handle, _transferBuffer);
+        }
     }
 
     public override void Dispose()

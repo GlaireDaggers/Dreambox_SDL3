@@ -577,6 +577,16 @@ class VDP : IDisposable
         private uint _pad1;
     }
 
+    struct DepthQueryParams
+    {
+        public int rect_x;
+        public int rect_y;
+        public int rect_w;
+        public int rect_h;
+        public VDPCompare compareOp;
+        public float compareRef;
+    }
+
     struct GenPhaseParams
     {
         public float screenHeight;
@@ -760,6 +770,10 @@ class VDP : IDisposable
 
     private ComputePipeline _convertYuvPipeline;
     private GraphicsBuffer _yuvBuffer;
+
+    private ComputePipeline _depthQueryPipeline;
+    private GraphicsBuffer _depthQueryResults;
+    private nint _depthQueryFence;
 
     private uint _frameCount;
 
@@ -1064,6 +1078,14 @@ class VDP : IDisposable
             });
 
         _convertYuvPipeline = new ComputePipeline(graphicsDevice, File.ReadAllBytes("content/shaders/convert_yuv.spv"), "main", 0, 0, 1, 1, 0, 1, 1, 1, 1);
+
+        // enough of a buffer to convert a 1024x1024 YUV image
+        _yuvBuffer = new GraphicsBuffer(graphicsDevice, (1024 * 1024) + (512 * 512 * 2), SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+
+        _depthQueryPipeline = new ComputePipeline(graphicsDevice, File.ReadAllBytes("content/shaders/depth_query.spv"), "main", 1, 0, 0, 0, 1, 1, 1, 1, 1);
+
+        // big enough buffer to store output results of depth query (uint)
+        _depthQueryResults = new GraphicsBuffer(graphicsDevice, 4, SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
 
         // enough of a buffer to convert a 1024x1024 YUV image
         _yuvBuffer = new GraphicsBuffer(graphicsDevice, (1024 * 1024) + (512 * 512 * 2), SDL.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
@@ -1855,15 +1877,83 @@ class VDP : IDisposable
         }
     }
 
-    // NOTE: currently depth query is not available in SDL3 GPU and is not planned as far as I'm aware
-    // Skipping it for now, eventually I may see if I can implement it with a compute pass if people actually need it
-    public void SubmitDepthQuery(float _refVal, VDPCompare _compare, SDL.SDL_Rect _rect)
+    // TODO:
+    // I think this should work, but it is COMPLETELY untested
+
+    public void SubmitDepthQuery(float refVal, VDPCompare compare, SDL.SDL_Rect rect)
     {
+        // oops, there was an old depth query in flight already. oh well.
+        if (_depthQueryFence != 0)
+        {
+            SDL.SDL_ReleaseGPUFence(_graphicsDevice.handle, _depthQueryFence);
+        }
+
+        // we record a brand new command buffer for this query instead of using the main one
+        // that way, we can immediately submit the command buffer and grab a fence for the depth query
+        // this does mean depth results will be a frame behind (as this command buffer will be executed before the main command buffer)
+
+        nint cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(_graphicsDevice.handle);
+
+        nint computePass = SDL.SDL_BeginGPUComputePass(cmdBuf, [], 0, [
+            new SDL.SDL_GPUStorageBufferReadWriteBinding() {
+                buffer = _depthQueryResults.handle,
+                cycle = true
+            }
+        ], 1);
+
+        SDL.SDL_BindGPUComputePipeline(computePass, _depthQueryPipeline.handle);
+
+        SDL.SDL_BindGPUComputeSamplers(computePass, 0, [
+            new SDL.SDL_GPUTextureSamplerBinding() {
+                texture = _depthTarget.handle,
+                sampler = _linearSampler,
+            }
+        ], 1);
+
+        DepthQueryParams p = new DepthQueryParams() {
+            rect_x = rect.x,
+            rect_y = rect.y,
+            rect_w = rect.w,
+            rect_h = rect.h,
+            compareOp = compare,
+            compareRef = refVal,
+        };
+
+        unsafe
+        {
+            DepthQueryParams* pPtr = &p;
+            SDL.SDL_PushGPUComputeUniformData(cmdBuf, 0, (nint)pPtr, (uint)Unsafe.SizeOf<DepthQueryParams>());
+        }
+
+        // invoke compute shader
+        SDL.SDL_DispatchGPUCompute(computePass, 1, 1, 1);
+        SDL.SDL_EndGPUComputePass(computePass);
+
+        // download results back into transfer buffer
+        nint copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
+        _depthQueryResults.GetData<uint>(copyPass, 0, 1);
+        SDL.SDL_EndGPUCopyPass(copyPass);
+
+        // submit & grab a fence!
+        _depthQueryFence = SDL.SDL_SubmitGPUCommandBufferAndAcquireFence(cmdBuf);
     }
 
     public int GetDepthQueryResult()
     {
-        return 0;
+        if (_depthQueryFence == 0)
+        {
+            Console.WriteLine("Attempted to get the results of a depth query, but no query has been submitted");
+            return 0;
+        }
+
+        // wait until the query has finished
+        SDL.SDL_WaitForGPUFences(_graphicsDevice.handle, true, [_depthQueryFence], 1);
+        SDL.SDL_ReleaseGPUFence(_graphicsDevice.handle, _depthQueryFence);
+        _depthQueryFence = 0;
+
+        Span<int> result = [0];
+        _depthQueryResults.ReadData(result);
+        return result[0];
     }
 
     public void SetRenderTarget(int handle)
@@ -2437,6 +2527,11 @@ class VDP : IDisposable
         }
         _pipelineCache.Clear();
 
+        if (_depthQueryFence != 0)
+        {
+            SDL.SDL_ReleaseGPUFence(_graphicsDevice.handle, _depthQueryFence);
+        }
+
         SDL.SDL_ReleaseGPUSampler(_graphicsDevice.handle, _linearSampler);
         SDL.SDL_ReleaseGPUSampler(_graphicsDevice.handle, _shadowmaskSampler);
 
@@ -2444,6 +2539,9 @@ class VDP : IDisposable
 
         _convertYuvPipeline.Dispose();
         _yuvBuffer.Dispose();
+
+        _depthQueryPipeline.Dispose();
+        _depthQueryResults.Dispose();
 
         _vu_data.Dispose();
         _vu_program.Dispose();
