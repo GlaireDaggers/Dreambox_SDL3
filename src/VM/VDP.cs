@@ -384,8 +384,8 @@ class VdpRenderTexture : VdpTexture
 class VDP : IDisposable
 {
     // number of VU cycles you can spend per frame in order to maintain 60Hz refresh rate (~3m per second)
-    // note: currently tuned for being able to draw 150K vertices per frame (50K triangles * 3 vertices per triangle) with a 16-instruction VU program
-    public const int VU_CYCLES_PER_FRAME = 150000 * 16;
+    // note: currently tuned for being able to draw 150K vertices per frame (50K triangles * 3 vertices per triangle) with an 8-instruction VU program
+    public const int VU_CYCLES_PER_FRAME = 150000 * 8;
 
     public const int SCREEN_WIDTH = 640;
     public const int SCREEN_HEIGHT = 480;
@@ -1164,12 +1164,12 @@ class VDP : IDisposable
             EncodeVUInstr(0, 1, 1),
             EncodeVUInstr(0, 2, 2),
             EncodeVUInstr(0, 3, 3),
-            EncodeVUInstr(14, 1, 1, 0, 1, 0, 1, 0b1111),
+            EncodeVUInstr(23, 1, 1, 0, 1, 0, 1, 0b1111),
             EncodeVUInstr(1, 0, 0),
             EncodeVUInstr(1, 1, 1),
             EncodeVUInstr(1, 2, 2),
             EncodeVUInstr(1, 3, 3),
-            EncodeVUInstr(15, 0, 0),
+            EncodeVUInstr(0x3F, 0, 0),
         ];
 
         var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(_graphicsDevice.handle);
@@ -2582,13 +2582,13 @@ class VDP : IDisposable
     private static uint EncodeVUInstr(ushort opcode, ushort d, ushort s, ushort sx = 0, ushort sy = 0, ushort sz = 0, ushort sw = 0, ushort m = 0)
     {
         return (uint)(
-            (opcode & 0xF) |
-            ((d & 0xF) << 4) |
-            ((s & 0xF) << 8) |
-            ((sx & 3) << 12) |
-            ((sy & 3) << 14) |
-            ((sz & 3) << 16) |
-            ((sw & 3) << 18) |
-            ((m & 0xF) << 20));
+            (opcode & 0x3F) |
+            ((d & 0xF) << 6) |
+            ((s & 0xF) << 10) |
+            ((sx & 3) << 14) |
+            ((sy & 3) << 16) |
+            ((sz & 3) << 18) |
+            ((sw & 3) << 20) |
+            ((m & 0xF) << 22));
     }
 }
