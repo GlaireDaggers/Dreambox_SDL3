@@ -27,8 +27,8 @@ jobs:
       - run: ./publish-linux-x64.sh
         working-directory: ./src
       - run: |
-          BUTLER_API_KEY=$(jq -r '.inputs.api-key' $GITHUB_EVENT_PATH)
-          echo ::add-mask::$BUTLER_API_KEY
+          BUTLER_API_KEY=$(jq -r '.inputs.api-key' ${GITHUB_EVENT_PATH})
+          echo "::add-mask::${BUTLER_API_KEY}"
           echo BUTLER_API_KEY=$BUTLER_API_KEY >> $GITHUB_ENV
       - uses: manleydev/butler-publish-itchio-action@master
         env:
@@ -51,8 +51,8 @@ jobs:
       - run: ./publish-win-x64.bat
         working-directory: ./src
       - run: |
-          BUTLER_API_KEY=$(jq -r '.inputs.api-key' $GITHUB_EVENT_PATH)
-          echo ::add-mask::$BUTLER_API_KEY
+          BUTLER_API_KEY=$(jq -r '.inputs.api-key' ${GITHUB_EVENT_PATH})
+          echo "::add-mask::${BUTLER_API_KEY}"
           echo BUTLER_API_KEY=$BUTLER_API_KEY >> $GITHUB_ENV
       - uses: manleydev/butler-publish-itchio-action@master
         env:
