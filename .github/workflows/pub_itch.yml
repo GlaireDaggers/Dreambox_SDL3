@@ -28,12 +28,12 @@ jobs:
         working-directory: ./src
       - uses: manleydev/butler-publish-itchio-action@master
         env:
-          BUTLER_API_KEY: ${{ github.events.inputs.api-key }}
+          BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
           CHANNEL: linux-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
           PACKAGE: ./src/publish/dreambox-linux-x64/
-          VERSION: ${{ github.events.inputs.version }}
+          VERSION: ${{ github.event.inputs.version }}
   publish_win_x64:
     runs-on: windows-latest
     steps:
@@ -48,9 +48,9 @@ jobs:
       - run: ./publish-win-x64.bat
       - uses: manleydev/butler-publish-itchio-action@master
         env:
-          BUTLER_API_KEY: ${{ github.events.inputs.api-key }}
+          BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
           CHANNEL: windows-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
           PACKAGE: ./src/publish/dreambox-win-x64/
-          VERSION: ${{ github.events.inputs.version }}
+          VERSION: ${{ github.event.inputs.version }}
