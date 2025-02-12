@@ -26,10 +26,12 @@ jobs:
           dotnet-version: '9.0.x'
       - run: ./publish-linux-x64.sh
         working-directory: ./src
-      - run: echo "::add-mask::$BUTLER_API_KEY"
+      - run: |
+          BUTLER_API_KEY=$(jq -r '.inputs.api-key' $GITHUB_EVENT_PATH)
+      	  echo ::add-mask::$BUTLER_API_KEY
+          echo BUTLER_API_KEY=$BUTLER_API_KEY >> $GITHUB_ENV
       - uses: manleydev/butler-publish-itchio-action@master
         env:
-          BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
           CHANNEL: linux-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
@@ -48,10 +50,12 @@ jobs:
           dotnet-version: '9.0.x'
       - run: ./publish-win-x64.bat
         working-directory: ./src
-      - run: echo "::add-mask::$BUTLER_API_KEY"
+      - run: |
+          BUTLER_API_KEY=$(jq -r '.inputs.api-key' $GITHUB_EVENT_PATH)
+      	  echo ::add-mask::$BUTLER_API_KEY
+          echo BUTLER_API_KEY=$BUTLER_API_KEY >> $GITHUB_ENV
       - uses: manleydev/butler-publish-itchio-action@master
         env:
-          BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
           CHANNEL: windows-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
