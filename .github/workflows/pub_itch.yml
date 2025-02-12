@@ -26,6 +26,7 @@ jobs:
           dotnet-version: '9.0.x'
       - run: ./publish-linux-x64.sh
         working-directory: ./src
+      - run: echo "::add-mask::${{ github.event.inputs.api-key }}"
       - uses: manleydev/butler-publish-itchio-action@master
         env:
           BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
@@ -46,6 +47,8 @@ jobs:
         with:
           dotnet-version: '9.0.x'
       - run: ./publish-win-x64.bat
+        working-directory: ./src
+      - run: echo "::add-mask::${{ github.event.inputs.api-key }}"
       - uses: manleydev/butler-publish-itchio-action@master
         env:
           BUTLER_API_KEY: ${{ github.event.inputs.api-key }}
