@@ -59,7 +59,7 @@ jobs:
           CHANNEL: linux-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
-          PACKAGE: dreambox-linux-x64
+          PACKAGE: dreambox-linux-x64.zip
           VERSION: ${{ github.event.inputs.version }}
       - uses: manleydev/butler-publish-itchio-action@master
         env:
@@ -67,5 +67,5 @@ jobs:
           CHANNEL: windows-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
-          PACKAGE: dreambox-win-x64
+          PACKAGE: dreambox-win-x64.zip
           VERSION: ${{ github.event.inputs.version }}
