@@ -1,0 +1,56 @@
+name: Publish Dreambox (Itch.IO)
+
+on:
+  workflow_dispatch:
+    inputs:
+      api-key:
+        description: 'API key for uploading to Itch.IO via Butler'
+        required: true
+        default: ''
+      version:
+        description: 'Version number'
+        required: true
+        default: ''
+
+jobs:
+  publish_linux_x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: 'true'
+          submodules: 'recursive'
+      - run: git lfs checkout
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: ./publish-linux-x64.sh
+        working-directory: ./src
+      - uses: manleydev/butler-publish-itchio-action@master
+        env:
+          BUTLER_CREDENTIALS: ${{ github.events.inputs.api-key }}
+          CHANNEL: linux-x64
+          ITCH_GAME: dreambox
+          ITCH_USER: crit-chance-studios
+          PACKAGE: ./src/publish/dreambox-linux-x64/
+          VERSION: ${{ github.events.inputs.version }}
+  publish_win_x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: 'true'
+          submodules: 'recursive'  
+      - run: git lfs checkout
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: ./publish-win-x64.bat
+      - uses: manleydev/butler-publish-itchio-action@master
+        env:
+          BUTLER_CREDENTIALS: ${{ github.events.inputs.api-key }}
+          CHANNEL: windows-x64
+          ITCH_GAME: dreambox
+          ITCH_USER: crit-chance-studios
+          PACKAGE: ./src/publish/dreambox-win-x64/
+          VERSION: ${{ github.events.inputs.version }}
