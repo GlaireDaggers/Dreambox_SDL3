@@ -8,7 +8,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'  
+          lfs: 'true'
+          submodules: 'recursive'
+      - run: git lfs checkout
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -23,7 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          lfs: 'true'
           submodules: 'recursive'  
+      - run: git lfs checkout
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
