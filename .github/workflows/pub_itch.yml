@@ -50,16 +50,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dreambox-linux-x64
+          path: dreambox-linux-x64
       - uses: actions/download-artifact@v4
         with:
           name: dreambox-win-x64
+          path: dreambox-win-x64
       - uses: manleydev/butler-publish-itchio-action@master
         env:
           BUTLER_CREDENTIALS: ${{ secrets.ITCH_AUTH_KEY }}
           CHANNEL: linux-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
-          PACKAGE: dreambox-linux-x64.zip
+          PACKAGE: dreambox-linux-x64
           VERSION: ${{ github.event.inputs.version }}
       - uses: manleydev/butler-publish-itchio-action@master
         env:
@@ -67,5 +69,5 @@ jobs:
           CHANNEL: windows-x64
           ITCH_GAME: dreambox
           ITCH_USER: crit-chance-studios
-          PACKAGE: dreambox-win-x64.zip
+          PACKAGE: dreambox-win-x64
           VERSION: ${{ github.event.inputs.version }}
