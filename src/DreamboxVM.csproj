@@ -10,6 +10,7 @@
     <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
     <PackageReference Include="MeltySynth" Version="2.4.1" />
     <PackageReference Include="NAudio.Core" Version="2.2.1" />
+    <PackageReference Include="QoiSharp" Version="1.0.0" />
     <PackageReference Include="Wasmtime" Version="22.0.0" />
   </ItemGroup>
 
@@ -21,6 +22,7 @@
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <PropertyGroup>

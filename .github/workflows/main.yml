@@ -19,7 +19,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dreambox-linux-x64
-          path: ./src/publish/dreambox-linux-x64.tar.gz
+          path: ./src/publish/dreambox-linux-x64/
   build_win_x64:
     runs-on: windows-latest
     steps:
@@ -36,4 +36,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dreambox-win-x64
-          path: ./src/publish/dreambox-win-x64.tar.gz
+          path: ./src/publish/dreambox-win-x64/

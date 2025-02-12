@@ -8,6 +8,7 @@ using DreamboxVM.ImGuiRendering;
 using DreamboxVM.VM;
 using DreamboxVM.Windows;
 using ImGuiNET;
+using QoiSharp;
 using SDL3;
 
 class DreamboxApp
@@ -111,6 +112,21 @@ class DreamboxApp
         if (_window == 0)
         {
             throw new Exception("Failed to create window");
+        }
+
+        // load icon
+        var icon = QoiDecoder.Decode(File.ReadAllBytes("icon.qoi"));
+        
+        unsafe
+        {
+            fixed (void* pixels = icon.Data)
+            {
+                var iconSurface = SDL.SDL_CreateSurfaceFrom(icon.Width, icon.Height, icon.Channels == QoiSharp.Codec.Channels.Rgb ? SDL.SDL_PixelFormat.SDL_PIXELFORMAT_RGB24 : SDL.SDL_PixelFormat.SDL_PIXELFORMAT_RGBA32,
+                    (nint)pixels, icon.Channels == QoiSharp.Codec.Channels.Rgb ? icon.Width * 3 : icon.Width * 4);
+
+                SDL.SDL_SetWindowIcon(_window, (nint)iconSurface);
+                SDL.SDL_DestroySurface((nint)iconSurface);
+            }
         }
 
         // create graphics device
