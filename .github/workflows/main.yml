@@ -18,3 +18,18 @@ jobs:
         with:
           name: dreambox-linux-x64
           path: ./src/publish/dreambox-linux-x64.tar.gz
+  build_win_x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'  
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: ./publish-win-x64.bat
+        working-directory: ./src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dreambox-win-x64
+          path: ./src/publish/dreambox-win-x64.tar.gz
