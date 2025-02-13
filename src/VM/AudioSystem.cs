@@ -762,11 +762,11 @@ public class AudioSystem : IDisposable
 
         if (_midiReverb)
         {
-            _activeMidiSequencer?.RenderInterleaved(_reverbBuffer[..buffer.Length]);
+            _activeMidiSequencer?.RenderInterleaved(_reverbBuffer.AsSpan()[..buffer.Length]);
         }
         else
         {
-            _activeMidiSequencer?.RenderInterleaved(_midiBuffer[..buffer.Length]);
+            _activeMidiSequencer?.RenderInterleaved(_midiBuffer.AsSpan()[..buffer.Length]);
 
             for (int i = 0; i < buffer.Length; i++)
             {
@@ -792,7 +792,7 @@ public class AudioSystem : IDisposable
                 {
                     int bufferStart = written * CHANNELS;
                     int bufferEnd = bufferStart + (mixLen * CHANNELS);
-                    var reverbSlice = _reverbBuffer[bufferStart..bufferEnd];
+                    var reverbSlice = _reverbBuffer.AsSpan()[bufferStart..bufferEnd];
                     var drySlice = buffer[bufferStart..bufferEnd];
                     MixVoices(reverbSlice, drySlice);
                     written += mixLen;

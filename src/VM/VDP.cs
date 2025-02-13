@@ -1749,6 +1749,7 @@ class VDP : IDisposable
 
         if (_texCache[handle] is VdpTexture tex)
         {
+            _totalTexMem -= tex.sizeBytes;
             _disposeQueue.Enqueue(tex);
         }
 

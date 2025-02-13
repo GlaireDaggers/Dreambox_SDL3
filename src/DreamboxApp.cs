@@ -3,6 +3,7 @@ namespace DreamboxVM;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using CommandLine;
 using DreamboxVM.Graphics;
 using DreamboxVM.ImGuiRendering;
 using DreamboxVM.VM;
@@ -63,6 +64,8 @@ class DreamboxApp
     public VDP VdpInstance => _vdp;
     public AudioSystem AudioSystemInstance => _audioSys;
 
+    public readonly CLIOptions cliOptions;
+
     private readonly DreamboxConfig _config;
     private readonly nint _window;
     private readonly GraphicsDevice _graphicsDevice;
@@ -82,16 +85,24 @@ class DreamboxApp
 
     private bool _paused = false;
 
-    private bool _debug = false;
-
     private DiskDriverWrapper _disk;
     private IDiskDriver? _queueLoadDisk = null;
 
     private bool _debugWireframe = false;
 
-    public DreamboxApp(bool debug)
+    public DreamboxApp()
     {
-        _debug = debug;
+        CLIOptions options = new CLIOptions();
+        Parser.Default.ParseArguments<CLIOptions>(Environment.GetCommandLineArgs())
+            .WithParsed(o => {
+                options = o;
+            })
+            .WithNotParsed(errors => {
+                Console.WriteLine("Failed parsing commandline arguments - falling back to default options");
+            });
+
+        cliOptions = options;
+
         _instance = this;
 
         // load config
@@ -147,21 +158,28 @@ class DreamboxApp
 
         if (_config.DefaultDiscDriver == DreamboxDiscDriver.CD)
         {
-            _disk.internalDriver = CreateCDDriver();
+            _disk.SetDriver(CreateCDDriver());
         }
         else if (_config.DefaultDiscDriver == DreamboxDiscDriver.ISO)
         {
-            _disk.internalDriver = new ISODiskDriver();
+            _disk.SetDriver(new ISODiskDriver());
         }
         else
         {
             Console.WriteLine("Invalid CD driver (falling back to ISO driver)");
-            _disk.internalDriver = new ISODiskDriver();
+            _disk.SetDriver(new ISODiskDriver());
         }
 
-    #if ENABLE_STANDALONE_MODE
-        _disk.internalDriver.Insert(File.OpenRead("content/game.iso"));
-    #endif
+        if (!string.IsNullOrEmpty(cliOptions.StartCD))
+        {
+            _disk.Insert(File.OpenRead(cliOptions.StartCD));
+        }
+        #if ENABLE_STANDALONE_MODE
+        else
+        {
+            _disk.Insert(File.OpenRead("content/game.iso"));
+        }
+        #endif
 
         _mca = new MemoryCard(PathUtils.GetPath("memcard_a.sav"));
         _mcb = new MemoryCard(PathUtils.GetPath("memcard_b.sav"));
@@ -208,10 +226,10 @@ class DreamboxApp
             {
                 if (_queueLoadDisk != null)
                 {
-                    _disk.internalDriver = _queueLoadDisk;
+                    _disk.SetDriver(_queueLoadDisk);
                     _queueLoadDisk = null;
 
-                    if (_config.SkipBIOS)
+                    if (_config.SkipBIOS || cliOptions.SkipBios)
                     {
                         ResetVM();   
                     }
@@ -362,7 +380,7 @@ class DreamboxApp
         // init game VM
         return InitGameVM();
     #else
-        if (_config.SkipBIOS && _disk.Inserted())
+        if ((_config.SkipBIOS || cliOptions.SkipBios) && _disk.Inserted())
         {
             return InitGameVM();
         }
@@ -394,7 +412,7 @@ class DreamboxApp
     #else
         // init VM with BIOS
         byte[] bios = File.ReadAllBytes("content/bios.wasm");
-        return Runtime.CreateWasmRuntime(bios, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+        return Runtime.CreateWasmRuntime(bios, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, cliOptions.WasmDebug);
     #endif
     }
 
@@ -403,7 +421,7 @@ class DreamboxApp
     #if FORCE_PRECOMPILED_RUNTIME
         // load precompiled binary
         byte[] moduleBytes = File.ReadAllBytes("content/runtime.cwasm");
-        return Runtime.CreatePrecompiledRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+        return Runtime.CreatePrecompiledRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, cliOptions.WasmDebug);
     #else
         // load game binary from disk & init VM
         byte[] moduleBytes;
@@ -413,7 +431,7 @@ class DreamboxApp
             execStream.CopyTo(memStream);
             moduleBytes = memStream.ToArray();
         }
-        return Runtime.CreateWasmRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, false);
+        return Runtime.CreateWasmRuntime(moduleBytes, _config, _disk, _mca, _mcb, _vdp, _audioSys, _inputSys, cliOptions.WasmDebug);
     #endif
     }
 
@@ -584,11 +602,11 @@ class DreamboxApp
             // status text
             {
                 ImGui.SameLine(0f, 100f);
-                if (_disk.internalDriver is ISODiskDriver)
+                if (_disk.InternalDriver is ISODiskDriver)
                 {
                     ImGui.TextDisabled("Disk Driver: ISO");
                 }
-                else if (_disk.internalDriver is WindowsCDDiskDriver || _disk.internalDriver is LinuxCDDiskDriver)
+                else if (_disk.InternalDriver is WindowsCDDiskDriver || _disk.InternalDriver is LinuxCDDiskDriver)
                 {
                     ImGui.TextDisabled("Disk Driver: CD/DVD");
                 }

@@ -1,10 +1,13 @@
-﻿namespace DreamboxVM;
+﻿using System.Diagnostics.CodeAnalysis;
+
+namespace DreamboxVM;
 
 class Program
 {
-    static void Main(string[] args)
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CLIOptions))]
+    static void Main()
     {
-        var app = new DreamboxApp(false);
+        var app = new DreamboxApp();
         app.Run();
     }
 }

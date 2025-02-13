@@ -108,7 +108,7 @@ public class DiscStream : Stream
     }
 }
 
-public interface IDiskDriver
+public interface IDiskDriver : IDisposable
 {
     void Update(float dt);
     string? GetLabel();
@@ -122,38 +122,51 @@ public interface IDiskDriver
 
 public class DiskDriverWrapper : IDiskDriver
 {
-    public IDiskDriver? internalDriver;
+    public IDiskDriver? InternalDriver => _internalDriver;
+
+    private IDiskDriver? _internalDriver;
+
+    public void SetDriver(IDiskDriver newDriver)
+    {
+        _internalDriver?.Dispose();
+        _internalDriver = newDriver;
+    }
+
+    public void Dispose()
+    {
+        _internalDriver?.Dispose();
+    }
 
     public void Update(float dt) {
-        internalDriver?.Update(dt);
+        _internalDriver?.Update(dt);
     }
 
     public string? GetLabel() {
-        return internalDriver?.GetLabel();
+        return _internalDriver?.GetLabel();
     }
     
     public void Insert(Stream fs) {
-        internalDriver?.Insert(fs);
+        _internalDriver?.Insert(fs);
     }
     
     public void Eject() {
-        internalDriver?.Eject();
+        _internalDriver?.Eject();
     }
     
     public bool Inserted() {
-        return internalDriver?.Inserted() ?? false;
+        return _internalDriver?.Inserted() ?? false;
     }
     
     public DirectoryReader? OpenDirectory(string path) {
-        return internalDriver?.OpenDirectory(path);
+        return _internalDriver?.OpenDirectory(path);
     }
     
     public Stream OpenRead(string path) {
-        return internalDriver?.OpenRead(path) ?? throw new Exception("No disk mounted");
+        return _internalDriver?.OpenRead(path) ?? throw new Exception("No disk mounted");
     }
     
     public bool FileExists(string path) {
-        return internalDriver?.FileExists(path) ?? false;
+        return _internalDriver?.FileExists(path) ?? false;
     }
 }
 
@@ -162,6 +175,12 @@ public class ISODiskDriver : IDiskDriver
     private CDReader? _reader;
     private Stream? _cdFile;
     private DiscStream? _cdFileWrapper;
+
+    public void Dispose()
+    {
+        _reader?.Dispose();
+        _cdFile?.Dispose();
+    }
 
     public void Update(float dt)
     {
@@ -242,6 +261,9 @@ public class WindowsCDDiskDriver : IDiskDriver
         IntPtr hTemplateFile
     );
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern bool CloseFile(IntPtr handle);
+
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool DeviceIoControl(
         IntPtr hDevice,
@@ -296,6 +318,21 @@ public class WindowsCDDiskDriver : IDiskDriver
 
         // start background polling task
         _drivePollTask = Task.Run(PollDrive);
+    }
+
+    public void Dispose()
+    {
+        _drivePollRunning = false;
+        _drivePollTask.Wait();
+
+        _activeDriveStreamWrapper?.Dispose();
+        _activeDriveStream?.Dispose();
+        _activeReader?.Dispose();
+
+        if (_driveHandle != IntPtr.Zero)
+        {
+            CloseFile(_driveHandle);
+        }
     }
 
     public void Update(float dt)
@@ -362,8 +399,7 @@ public class WindowsCDDiskDriver : IDiskDriver
     {
         while (_drivePollRunning)
         {
-            bool driveReady = false;
-            string? driveLabel = null;
+            string? driveLabel;
 
             try
             {
@@ -374,12 +410,10 @@ public class WindowsCDDiskDriver : IDiskDriver
                 driveLabel = null;
             }
 
-            driveReady = _driveInfo.IsReady;
-
             _statusQueue.Enqueue(new DriveStatus
             {
                 driveLabel = driveLabel,
-                isReady = driveReady,
+                isReady = _driveInfo.IsReady,
             });
 
             Thread.Sleep(1000);
@@ -458,8 +492,6 @@ public class LinuxCDDiskDriver : IDiskDriver
     private DiscStream? _activeDriveStreamWrapper;
     private CDReader? _activeReader;
 
-    private IntPtr _driveHandle;
-
     public LinuxCDDiskDriver()
     {
         // try and find an attached CD-ROM drive
@@ -481,6 +513,16 @@ public class LinuxCDDiskDriver : IDiskDriver
 
         // start background polling task
         _drivePollTask = Task.Run(PollDrive);
+    }
+
+    public void Dispose()
+    {
+        _drivePollRunning = false;
+        _drivePollTask.Wait();
+
+        _activeDriveStreamWrapper?.Dispose();
+        _activeDriveStream?.Dispose();
+        _activeReader?.Dispose();
     }
 
     public void Update(float dt)
@@ -552,9 +594,7 @@ public class LinuxCDDiskDriver : IDiskDriver
     {
         while (_drivePollRunning)
         {
-            bool driveReady = false;
-            string? driveLabel = null;
-
+            string? driveLabel;
             try
             {
                 driveLabel = _driveInfo.IsReady ? _driveInfo.VolumeLabel : null;
@@ -564,12 +604,10 @@ public class LinuxCDDiskDriver : IDiskDriver
                 driveLabel = null;
             }
 
-            driveReady = _driveInfo.IsReady;
-
             _statusQueue.Enqueue(new DriveStatus
             {
                 driveLabel = driveLabel,
-                isReady = driveReady,
+                isReady = _driveInfo.IsReady,
             });
 
             Thread.Sleep(1000);
