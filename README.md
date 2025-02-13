@@ -10,7 +10,7 @@ This port saves user data into a new folder compared to the old FNA version.
 The config JSON file format is not compatible with the old FNA version. However, the memory card save file format is identical.
 
 # New features!
-New extensions have been added to the Dreambox API in this port which didn't exist in the original (NOTE: these are currently considered experimental and subject to change). These are:
+New extensions have been added to the Dreambox API in this port which didn't exist in the original. These are:
 
 - `vdp_setVUCData` allows you to set one of 16 "constant data" slots of the "Vertex Unit" (VU) with a vector value.
 - `vdp_setVULayout` allows you to configure one of 8 "vertex input slots" of the VU, representing vertex input data (such as position, normal, texcoord, color, etc)
