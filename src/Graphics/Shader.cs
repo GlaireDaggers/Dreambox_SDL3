@@ -5,6 +5,14 @@ using SDL3;
 
 class Shader : GraphicsResource
 {
+    public static Shader LoadShader(GraphicsDevice device, string path, SDL.SDL_GPUShaderStage stage,
+        int numSamplers, int numStorageBuffers, int numUniformBuffers)
+    {
+        Console.WriteLine("Loading shader: " + path);
+        byte[] data = File.ReadAllBytes(path);
+        return new Shader(device, data, "main", stage, numSamplers, numStorageBuffers, numUniformBuffers);
+    }
+
     private static unsafe nint CreateShader(nint gpuDevice, Span<byte> bytes, string entryPoint, SDL.SDL_GPUShaderStage stage,
         int numSamplers, int numStorageBuffers, int numUniformBuffers)
     {

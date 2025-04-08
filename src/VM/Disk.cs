@@ -67,6 +67,7 @@ public class DiscStream : Stream
             long bytesRemainingInSector = SECTOR_SIZE - offsetInSector;
             long readLen = bytesRemaining;
             if (readLen > bytesRemainingInSector) readLen = bytesRemainingInSector;
+            
 
             Buffer.BlockCopy(sectorBytes, (int)offsetInSector, buffer, offset, (int)readLen);
 

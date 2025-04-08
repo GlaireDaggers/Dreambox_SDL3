@@ -2,7 +2,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
 using DreamboxVM.Graphics;
 using SDL3;
 
@@ -395,11 +394,6 @@ class VDP : IDisposable
     public const int NUM_VU_CONSTANTS = 16;     // number of constant slots available to VU
     public const int NUM_VU_VERTEX_SLOTS = 8;   // number of input vertex slots available to VU
 
-    const int COLORBURST_LENGTH = 3;
-    const float COLORBURST_PPS = 0.25f;
-    const float COLORBURST_PPF = 0.25f;
-    const float SIGNAL_NOISE = 0.01f;
-
     private static readonly Dictionary<VDPBlendEquation, SDL.SDL_GPUBlendOp> BLEND_OP_TO_SDL = new () {
         { VDPBlendEquation.ADD, SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD },
         { VDPBlendEquation.SUBTRACT, SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_SUBTRACT },
@@ -458,32 +452,6 @@ class VDP : IDisposable
         // bit of a special case (technically it's just an RGBA8 texture, but uses a compute shader to convert YUV)
         { VDPTextureFormat.YUV420, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM },
     };
-
-    struct BlitVertex : IVertex
-    {
-        public Vector2 position;
-        public Vector2 texcoord;
-
-        public static SDL.SDL_GPUVertexAttribute[] GetLayout()
-        {
-            return [
-                new SDL.SDL_GPUVertexAttribute()
-                {
-                    location = 0,
-                    buffer_slot = 0,
-                    format = SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                    offset = 0
-                },
-                new SDL.SDL_GPUVertexAttribute()
-                {
-                    location = 1,
-                    buffer_slot = 0,
-                    format = SDL.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
-                    offset = 8
-                },
-            ];
-        }
-    }
 
     struct SamplerSettings : IEquatable<SamplerSettings>
     {
@@ -587,54 +555,6 @@ class VDP : IDisposable
         public float compareRef;
     }
 
-    struct GenPhaseParams
-    {
-        public float screenHeight;
-        public float frame;
-        public float pps;
-        public float ppf;
-    }
-
-    struct GenSignalParams
-    {
-        public bool svideo;
-        public float noiseAmount;
-        public float time;
-        public float c;
-        public Vector2 outputResolution;
-    }
-
-    struct DecSignal1Params
-    {
-        public Vector2 outputResolution;
-        public float c;
-    }
-
-    struct DecSignal2Params
-    {
-        public float c;
-        public bool temporalBlend;
-        public Vector2 outputResolution;
-    }
-
-    struct SharpenParams
-    {
-        public float sharpen_amount;
-        public float sharpen_resolution;
-    }
-
-    struct BlitTVParams
-    {
-        public Vector2 curvature;
-        public Vector2 scale;
-        public Vector2 maskScale;
-    }
-
-    struct BlitInterlaceParams
-    {
-        public int frame;
-    }
-
     struct VUDrawCmd
     {
         public int bufferOffset;
@@ -658,18 +578,12 @@ class VDP : IDisposable
 
     public int TextureMemoryUsage => _totalTexMem;
 
+    public Texture ScreenTarget => _screenTarget;
+
     private readonly GraphicsDevice _graphicsDevice;
-    private readonly Texture _screenTarget0;
-    private readonly Texture _screenTarget1;
-    private readonly Texture _screenTargetCombine;
+    private readonly Texture _screenTarget;
     private readonly Texture _depthTarget;
     private readonly Texture _blankTexture;
-
-    private readonly Texture _shadowmask;
-
-    private readonly Texture _cb_lut;         // NTSC colorburst phase lookup
-    private readonly Texture _signal_tex_1;   // used to generate/decode NTSC signal
-    private readonly Texture _signal_tex_2;
 
     private DreamboxConfig _config;
 
@@ -680,8 +594,6 @@ class VDP : IDisposable
     private nint _activeCopyPass = 0;
     private SDL.SDL_GPUViewport _activeViewport;
     private SDL.SDL_Rect _activeScissor;
-
-    private bool _screenFlip = false;
 
     private bool _needsNewRenderPass = true;
     private Color32? _clearColor = null;
@@ -700,8 +612,6 @@ class VDP : IDisposable
     private Queue<VUDrawCmd> _drawQueue = new Queue<VUDrawCmd>();
 
     private Queue<IDisposable> _disposeQueue = new Queue<IDisposable>();
-
-    private int _curFrame = 0;
 
     private PipelineSettings _drawSettings = new PipelineSettings() {
         topology = VDPTopology.TRIANGLE_LIST,
@@ -732,32 +642,13 @@ class VDP : IDisposable
     private VDPTexCombine _texCombine = VDPTexCombine.Mul;
     private VDPTexCombine _vtxCombine = VDPTexCombine.Mul;
 
-    private Shader _blit_vertex;
-    private Shader _blit_fragment;
-    private Shader _blit_tv;
-    private Shader _blit_interlace_fragment;
     private Shader _vu_vertex;
     private Shader _ff_fragment;
-    private Shader _gen_phase;
-    private Shader _gen_signal;
-    private Shader _dec_signal_1;
-    private Shader _dec_signal_2;
-    private Shader _sharpen;
-
-    private GraphicsPipeline _pso_blit;
-    private GraphicsPipeline _pso_blit_tv;
-    private GraphicsPipeline _pso_blit_interlace;
-    private GraphicsPipeline _pso_gen_phase;
-    private GraphicsPipeline _pso_gen_signal;
-    private GraphicsPipeline _pso_dec_signal_1;
-    private GraphicsPipeline _pso_dec_signal_2;
-    private GraphicsPipeline _pso_sharpen;
 
     private VertexBuffer<BlitVertex> _screenBlitQuad;
     private VertexBuffer<BlitVertex> _internalBlitQuad;
 
     private nint _linearSampler;
-    private nint _shadowmaskSampler;
 
     private GraphicsBuffer _vu_program;
     private GraphicsBuffer _vu_data;
@@ -775,8 +666,6 @@ class VDP : IDisposable
     private GraphicsBuffer _depthQueryResults;
     private nint _depthQueryFence;
 
-    private uint _frameCount;
-
     private bool _wireframeMode = false;
 
     public VDP(DreamboxConfig config, GraphicsDevice graphicsDevice)
@@ -785,11 +674,7 @@ class VDP : IDisposable
 
         _graphicsDevice = graphicsDevice;
         
-        _screenTarget0 = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SCREEN_WIDTH, SCREEN_HEIGHT, 1,
-            SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
-        _screenTarget1 = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SCREEN_WIDTH, SCREEN_HEIGHT, 1,
-            SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
-        _screenTargetCombine = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SCREEN_WIDTH, SCREEN_HEIGHT, 1,
+        _screenTarget = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SCREEN_WIDTH, SCREEN_HEIGHT, 1,
             SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
 
         _depthTarget = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SCREEN_WIDTH, SCREEN_HEIGHT, 1, SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
@@ -814,268 +699,11 @@ class VDP : IDisposable
 
         _blankTexture = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1, 1, 1, SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
 
-        _cb_lut = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, 1, SCREEN_HEIGHT, 1,
-            SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
-
-        _signal_tex_1 = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SCREEN_WIDTH * COLORBURST_LENGTH, SCREEN_HEIGHT, 1,
-            SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
-
-        _signal_tex_2 = new Texture(graphicsDevice, SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SCREEN_WIDTH * COLORBURST_LENGTH, SCREEN_HEIGHT, 1,
-            SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
-
         _frameVUData = new List<byte>(1024 * 3 * Unsafe.SizeOf<PackedVertex>());
 
         // load shaders
-        _blit_vertex = LoadShader(_graphicsDevice, "content/shaders/blit.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 0, 0);
-        _blit_fragment = LoadShader(_graphicsDevice, "content/shaders/blit.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 0);
-        _blit_tv = LoadShader(_graphicsDevice, "content/shaders/blit_tv.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
-        _blit_interlace_fragment = LoadShader(_graphicsDevice, "content/shaders/blit_interlace.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
-        _vu_vertex = LoadShader(_graphicsDevice, "content/shaders/vu.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-        _ff_fragment = LoadShader(_graphicsDevice, "content/shaders/fixedfunction.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
-
-        _gen_phase = LoadShader(_graphicsDevice, "content/shaders/gen_phase.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0, 1);
-        _gen_signal = LoadShader(_graphicsDevice, "content/shaders/gen_signal.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
-        _dec_signal_1 = LoadShader(_graphicsDevice, "content/shaders/dec_signal_1.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 1);
-        _dec_signal_2 = LoadShader(_graphicsDevice, "content/shaders/dec_signal_2.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
-        _sharpen = LoadShader(_graphicsDevice, "content/shaders/sharpen.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0, 1);
-
-        // load shadowmask texture
-        var cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(_graphicsDevice.handle);
-        var copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
-        {
-            using (var texFile = File.OpenRead("content/shadowmask.dds"))
-            using (var texFileReader = new BinaryReader(texFile))
-            {
-                _shadowmask = Texture.ParseDDS(graphicsDevice, texFileReader, copyPass, cmdBuf);
-            }
-        }
-        SDL.SDL_EndGPUCopyPass(copyPass);
-        SDL.SDL_SubmitGPUCommandBuffer(cmdBuf);
-
-        // create graphics pipelines
-        _pso_blit = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = graphicsDevice.swapchainFormat,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _blit_fragment,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_blit_tv = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = graphicsDevice.swapchainFormat,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _blit_tv,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_blit_interlace = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _screenTargetCombine.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _blit_interlace_fragment,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_gen_phase = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _cb_lut.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _gen_phase,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_gen_signal = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _signal_tex_1.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _gen_signal,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_dec_signal_1 = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _signal_tex_1.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _dec_signal_1,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_dec_signal_2 = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _signal_tex_1.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _dec_signal_2,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
-
-        _pso_sharpen = GraphicsPipeline.Create<BlitVertex>(graphicsDevice,
-            [new () {
-                format = _signal_tex_1.format,
-                blend_state = new ()
-                {
-                    src_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    src_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
-                    dst_color_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    dst_alpha_blendfactor = SDL.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
-                    color_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    alpha_blend_op = SDL.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
-                    enable_blend = false,
-                    enable_color_write_mask = false,
-                }
-            }], SDL.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_INVALID, false, _blit_vertex, _sharpen,
-            SDL.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-            new () {
-                fill_mode = SDL.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
-                cull_mode = SDL.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
-                front_face = SDL.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE,
-            },
-            new () {
-                sample_count = SDL.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
-            },
-            new () {
-                compare_op = SDL.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_ALWAYS
-            });
+        _vu_vertex = Shader.LoadShader(_graphicsDevice, "content/shaders/vu.vert.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
+        _ff_fragment = Shader.LoadShader(_graphicsDevice, "content/shaders/fixedfunction.frag.spv", SDL.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0, 1);
 
         _convertYuvPipeline = new ComputePipeline(graphicsDevice, File.ReadAllBytes("content/shaders/convert_yuv.spv"), "main", 0, 0, 1, 1, 0, 1, 1, 1, 1);
 
@@ -1094,7 +722,7 @@ class VDP : IDisposable
         _screenBlitQuad = new VertexBuffer<BlitVertex>(graphicsDevice, 6);
         _internalBlitQuad = new VertexBuffer<BlitVertex>(graphicsDevice, 6);
 
-        SetBlitQuad(_internalBlitQuad, 1.0f, 1.0f);
+        BlitVertex.SetBlitQuad(_graphicsDevice, _internalBlitQuad, 1.0f, 1.0f);
 
         SDL.SDL_SetGPUBufferName(_graphicsDevice.handle, _screenBlitQuad.handle, nameof(_screenBlitQuad));
 
@@ -1110,14 +738,6 @@ class VDP : IDisposable
             mag_filter = SDL.SDL_GPUFilter.SDL_GPU_FILTER_LINEAR,
             address_mode_u = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
             address_mode_v = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-        });
-
-        _shadowmaskSampler = SDL.SDL_CreateGPUSampler(graphicsDevice.handle, new SDL.SDL_GPUSamplerCreateInfo() {
-            min_filter = SDL.SDL_GPUFilter.SDL_GPU_FILTER_LINEAR,
-            mag_filter = SDL.SDL_GPUFilter.SDL_GPU_FILTER_LINEAR,
-            mipmap_mode = SDL.SDL_GPUSamplerMipmapMode.SDL_GPU_SAMPLERMIPMAPMODE_LINEAR,
-            address_mode_u = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
-            address_mode_v = SDL.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
         });
 
         ResetCompat();
@@ -1192,24 +812,6 @@ class VDP : IDisposable
             kvp.Value.Dispose();
         }
         _pipelineCache.Clear();
-    }
-
-    private Shader LoadShader(GraphicsDevice device, string path, SDL.SDL_GPUShaderStage stage,
-        int numSamplers, int numStorageBuffers, int numUniformBuffers)
-    {
-        Console.WriteLine("Loading shader: " + path);
-        byte[] data = File.ReadAllBytes(path);
-        return new Shader(device, data, "main", stage, numSamplers, numStorageBuffers, numUniformBuffers);
-    }
-
-    private Texture CurrentScreenTarget()
-    {
-        return _screenFlip ? _screenTarget1 : _screenTarget0;
-    }
-
-    private Texture PreviousScreenTarget()
-    {
-        return _screenFlip ? _screenTarget0 : _screenTarget1;
     }
 
     private void FlushDrawQueue()
@@ -1312,6 +914,14 @@ class VDP : IDisposable
 
     private void FlushRenderPass()
     {
+        // TODO: This is goofy as hell
+        // (basically if the user does a Clear, but doesn't draw anything else, we still need to start a new render pass & then end it)
+        if (_needsNewRenderPass && _activeRenderPass == 0)
+        {
+            _needsNewRenderPass = false;
+            CheckRenderPass();
+        }
+
         if (_activeRenderPass != 0)
         {
             SDL.SDL_EndGPURenderPass(_activeRenderPass);
@@ -1345,12 +955,10 @@ class VDP : IDisposable
         {
             FlushRenderPass();
 
-            var screenTarget = CurrentScreenTarget();
-
             // start new render pass
             _activeRenderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
                 new SDL.SDL_GPUColorTargetInfo() {
-                    texture = _drawSettings.target?.texture.handle ?? screenTarget.handle,
+                    texture = _drawSettings.target?.texture.handle ?? _screenTarget.handle,
                     clear_color = _clearColor?.ToFColor() ?? new SDL.SDL_FColor(),
                     load_op = _clearColor.HasValue ? SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR : SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_LOAD,
                     store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
@@ -1452,7 +1060,7 @@ class VDP : IDisposable
         // create new pipeline
         pso = new GraphicsPipeline(_graphicsDevice,
             [new () {
-                format = settings.target?.texture.format ?? _screenTarget0.format,
+                format = settings.target?.texture.format ?? _screenTarget.format,
                 blend_state = new ()
                 {
                     src_color_blendfactor = BLEND_FACTOR_TO_SDL[settings.blendFactorSrc],
@@ -1485,43 +1093,6 @@ class VDP : IDisposable
         return pso;
     }
 
-    private void SetBlitQuad(VertexBuffer<BlitVertex> vtxBuffer, float widthScale, float heightScale)
-    {
-        nint cmdBuf = SDL.SDL_AcquireGPUCommandBuffer(_graphicsDevice.handle);
-        nint copyPass = SDL.SDL_BeginGPUCopyPass(cmdBuf);
-
-        vtxBuffer.SetData<BlitVertex>(copyPass, [
-            new () {
-                position = new Vector2(-widthScale, -heightScale),
-                texcoord = new Vector2(0.0f, 1.0f)
-            },
-            new () {
-                position = new Vector2(widthScale, -heightScale),
-                texcoord = new Vector2(1.0f, 1.0f)
-            },
-            new () {
-                position = new Vector2(-widthScale, heightScale),
-                texcoord = new Vector2(0.0f, 0.0f)
-            },
-
-            new () {
-                position = new Vector2(widthScale, -heightScale),
-                texcoord = new Vector2(1.0f, 1.0f)
-            },
-            new () {
-                position = new Vector2(widthScale, heightScale),
-                texcoord = new Vector2(1.0f, 0.0f)
-            },
-            new () {
-                position = new Vector2(-widthScale, heightScale),
-                texcoord = new Vector2(0.0f, 0.0f)
-            },
-        ], 0, true);
-
-        SDL.SDL_EndGPUCopyPass(copyPass);
-        SDL.SDL_SubmitGPUCommandBuffer(cmdBuf);
-    }
-
     public void BeginFrame(nint cmdBuf)
     {
         _activeCmdBuf = cmdBuf;
@@ -1531,8 +1102,8 @@ class VDP : IDisposable
         _needsNewTexture = true;
         _frameVUData.Clear();
         _totalVuCostThisFrame = 0;
-
-        SDL.SDL_PushGPUDebugGroup(cmdBuf, $"VDP FRAME {_frameCount++}");
+        
+        // SDL.SDL_PushGPUDebugGroup(cmdBuf, $"VDP FRAME {_frameCount++}");
     }
 
     public void ClearColor(Color32 color)
@@ -1778,7 +1349,7 @@ class VDP : IDisposable
             return;
         }
 
-        var screenTarget = _drawSettings.target?.texture ?? CurrentScreenTarget();
+        var screenTarget = _drawSettings.target?.texture ?? _screenTarget;
 
         FlushRenderPass();
         SDL.SDL_BlitGPUTexture(_activeCmdBuf, new SDL.SDL_GPUBlitInfo() {
@@ -2138,359 +1709,6 @@ class VDP : IDisposable
         }
 
         numSkipFrames = _totalVuCostThisFrame / VU_CYCLES_PER_FRAME;
-
-        SDL.SDL_PopGPUDebugGroup(_activeCmdBuf);
-
-        nint renderPass;
-
-        var srcTex = CurrentScreenTarget();
-        if (_config.InterlacedVideo)
-        {
-            // interlace cur+prev frames into single image
-            renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                new SDL.SDL_GPUColorTargetInfo() {
-                    texture = _screenTargetCombine.handle,
-                    load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                    store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                    cycle = true
-                }
-            ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-            {
-                // set up render state
-                SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_blit_interlace.handle);
-                SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                    buffer = _internalBlitQuad.handle,
-                    offset = 0
-                }], 1);
-                SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                    new () {
-                        texture = _screenTarget0.handle,
-                        sampler = _linearSampler
-                    },
-                    new () {
-                        texture = _screenTarget1.handle,
-                        sampler = _linearSampler
-                    }
-                ], 2);
-
-                BlitInterlaceParams ubo;
-                ubo.frame = _curFrame;
-
-                unsafe
-                {
-                    SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<BlitInterlaceParams>());
-                }
-
-                // draw quad
-                SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-            }
-            SDL.SDL_EndGPURenderPass(renderPass);
-
-            srcTex = _screenTargetCombine;
-        }
-
-        if (_config.VideoMode == DreamboxVideoMode.Composite || _config.VideoMode == DreamboxVideoMode.SVideo)
-        {
-            // generate colorburst phase LUT
-            renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                new SDL.SDL_GPUColorTargetInfo() {
-                    texture = _cb_lut.handle,
-                    load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                    store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                    cycle = true
-                }
-            ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-            {
-                // set up render state
-                SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_gen_phase.handle);
-                SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                    buffer = _internalBlitQuad.handle,
-                    offset = 0
-                }], 1);
-
-                GenPhaseParams ubo;
-                ubo.screenHeight = SCREEN_HEIGHT;
-                ubo.ppf = COLORBURST_PPF;
-                ubo.pps = COLORBURST_PPS;
-                ubo.frame = _curFrame + 1;
-
-                unsafe
-                {
-                    SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<GenPhaseParams>());
-                }
-
-                // draw quad
-                SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-            }
-            SDL.SDL_EndGPURenderPass(renderPass);
-
-            // generate NTSC signal
-            renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                new SDL.SDL_GPUColorTargetInfo() {
-                    texture = _signal_tex_1.handle,
-                    load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                    store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                    cycle = true
-                }
-            ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-            {
-                // set up render state
-                SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_gen_signal.handle);
-                SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                    buffer = _internalBlitQuad.handle,
-                    offset = 0
-                }], 1);
-
-                SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                    new () {
-                        texture = srcTex.handle,
-                        sampler = _linearSampler
-                    },
-                    new () {
-                        texture = _cb_lut.handle,
-                        sampler = _linearSampler
-                    },
-                ], 2);
-
-                GenSignalParams ubo;
-                ubo.svideo = _config.VideoMode == DreamboxVideoMode.SVideo;
-                ubo.noiseAmount = SIGNAL_NOISE;
-                ubo.time = _curFrame / 60.0f;
-                ubo.c = COLORBURST_LENGTH;
-                ubo.outputResolution = new Vector2(_signal_tex_1.width, _signal_tex_1.height);
-
-                unsafe
-                {
-                    SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<GenSignalParams>());
-                }
-
-                // draw quad
-                SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-            }
-            SDL.SDL_EndGPURenderPass(renderPass);
-
-            Texture decodeSrc = _signal_tex_1;
-            Texture decodeDst = _signal_tex_2;
-
-            if (_config.VideoMode == DreamboxVideoMode.Composite)
-            {
-                // decode NTSC signal (pass 1)
-                renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                    new SDL.SDL_GPUColorTargetInfo() {
-                        texture = _signal_tex_2.handle,
-                        load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                        store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                        cycle = true
-                    }
-                ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-                {
-                    // set up render state
-                    SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_dec_signal_1.handle);
-                    SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                        buffer = _internalBlitQuad.handle,
-                        offset = 0
-                    }], 1);
-
-                    SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                        new () {
-                            texture = _signal_tex_1.handle,
-                            sampler = _linearSampler
-                        }
-                    ], 1);
-
-                    DecSignal1Params ubo;
-                    ubo.c = COLORBURST_LENGTH;
-                    ubo.outputResolution = new Vector2(_signal_tex_2.width, _signal_tex_2.height);
-
-                    unsafe
-                    {
-                        SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<DecSignal1Params>());
-                    }
-
-                    // draw quad
-                    SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-                }
-                SDL.SDL_EndGPURenderPass(renderPass);
-
-                decodeSrc = _signal_tex_2;
-                decodeDst = _signal_tex_1;
-            }
-
-            // decode NTSC signal (pass 2)
-            renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                new SDL.SDL_GPUColorTargetInfo() {
-                    texture = decodeDst.handle,
-                    load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                    store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                    cycle = true
-                }
-            ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-            {
-                // set up render state
-                SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_dec_signal_2.handle);
-                SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                    buffer = _internalBlitQuad.handle,
-                    offset = 0
-                }], 1);
-
-                SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                    new () {
-                        texture = decodeSrc.handle,
-                        sampler = _linearSampler
-                    },
-                    new () {
-                        texture = _cb_lut.handle,
-                        sampler = _linearSampler
-                    }
-                ], 2);
-
-                DecSignal2Params ubo;
-                ubo.c = COLORBURST_LENGTH;
-                ubo.temporalBlend = true;
-                ubo.outputResolution = new Vector2(_signal_tex_1.width, _signal_tex_1.height);
-
-                unsafe
-                {
-                    SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<DecSignal2Params>());
-                }
-
-                // draw quad
-                SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-            }
-            SDL.SDL_EndGPURenderPass(renderPass);
-
-            // sharpen
-            renderPass = SDL.SDL_BeginGPURenderPass(_activeCmdBuf, [
-                new SDL.SDL_GPUColorTargetInfo() {
-                    texture = decodeSrc.handle,
-                    load_op = SDL.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
-                    store_op = SDL.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
-                    cycle = true
-                }
-            ], 1, Unsafe.NullRef<SDL.SDL_GPUDepthStencilTargetInfo>());
-            {
-                // set up render state
-                SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_sharpen.handle);
-                SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                    buffer = _internalBlitQuad.handle,
-                    offset = 0
-                }], 1);
-
-                SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                    new () {
-                        texture = decodeDst.handle,
-                        sampler = _linearSampler
-                    },
-                    new () {
-                        texture = _cb_lut.handle,
-                        sampler = _linearSampler
-                    }
-                ], 2);
-
-                SharpenParams ubo;
-                ubo.sharpen_amount = _config.VideoMode == DreamboxVideoMode.Composite ? 0.3f : 0.15f;
-                ubo.sharpen_resolution = 640.0f;
-
-                unsafe
-                {
-                    SDL.SDL_PushGPUFragmentUniformData(_activeCmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<SharpenParams>());
-                }
-
-                // draw quad
-                SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
-            }
-            SDL.SDL_EndGPURenderPass(renderPass);
-        }
-
-        _curFrame++;
-        _screenFlip = !_screenFlip;
-    }
-
-    public void BlitToScreen(nint cmdBuf, nint renderPass, float widthScale, float heightScale)
-    {
-        // set up blit quad
-        SetBlitQuad(_screenBlitQuad, widthScale, heightScale);
-
-        Texture srcTex;
-        if (_config.VideoMode == DreamboxVideoMode.Default || _config.VideoMode == DreamboxVideoMode.VGA)
-        {
-            srcTex = _config.InterlacedVideo ? _screenTargetCombine : PreviousScreenTarget();
-        }
-        else if (_config.VideoMode == DreamboxVideoMode.Composite)
-        {
-            srcTex = _signal_tex_2;
-        }
-        else
-        {
-            srcTex = _signal_tex_1;
-        }
-
-        if (_config.CrtPreset != DreamboxCrtPreset.None)
-        {
-            // set up render state
-            SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_blit_tv.handle);
-            SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                buffer = _screenBlitQuad.handle,
-                offset = 0
-            }], 1);
-            SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                new () {
-                    texture = srcTex.handle,
-                    sampler = _linearSampler
-                },
-                new () {
-                    texture = _shadowmask.handle,
-                    sampler = _shadowmaskSampler
-                }
-            ], 2);
-
-            BlitTVParams ubo = new BlitTVParams();
-
-            switch (_config.CrtPreset)
-            {
-                case DreamboxCrtPreset.Curve:
-                    ubo.curvature = new Vector2(0.025f, 0.025f);
-                    break;
-                case DreamboxCrtPreset.Flat:
-                    ubo.curvature = Vector2.Zero;
-                    break;
-                case DreamboxCrtPreset.Trinitron:
-                    ubo.curvature = new Vector2(0f, 0.025f);
-                    break;
-            }
-
-            ubo.scale = new Vector2(
-                1.0f / (1.0f - ubo.curvature.X),
-                1.0f / (1.0f - ubo.curvature.Y));
-
-            ubo.maskScale = new Vector2(
-                640.0f / 6.0f,
-                480.0f / 8.0f
-            );
-
-            unsafe
-            {
-                SDL.SDL_PushGPUFragmentUniformData(cmdBuf, 0, (nint)(&ubo), (uint)Unsafe.SizeOf<BlitTVParams>());
-            }
-        }
-        else
-        {
-            // set up render state
-            SDL.SDL_BindGPUGraphicsPipeline(renderPass, _pso_blit.handle);
-            SDL.SDL_BindGPUVertexBuffers(renderPass, 0, [new () {
-                buffer = _screenBlitQuad.handle,
-                offset = 0
-            }], 1);
-            SDL.SDL_BindGPUFragmentSamplers(renderPass, 0, [
-                new () {
-                    texture = srcTex.handle,
-                    sampler = _linearSampler
-                },
-            ], 1);
-        }
-
-        // draw quad
-        SDL.SDL_DrawGPUPrimitives(renderPass, 6, 1, 0, 0);
     }
 
     public void GetTextures(List<VdpTextureHandle> outTextures)
@@ -2534,7 +1752,6 @@ class VDP : IDisposable
         }
 
         SDL.SDL_ReleaseGPUSampler(_graphicsDevice.handle, _linearSampler);
-        SDL.SDL_ReleaseGPUSampler(_graphicsDevice.handle, _shadowmaskSampler);
 
         _screenBlitQuad.Dispose();
 
@@ -2547,37 +1764,11 @@ class VDP : IDisposable
         _vu_data.Dispose();
         _vu_program.Dispose();
 
-        _pso_blit.Dispose();
-        _pso_blit_tv.Dispose();
-        _pso_blit_interlace.Dispose();
-        _pso_gen_phase.Dispose();
-        _pso_gen_signal.Dispose();
-        _pso_dec_signal_1.Dispose();
-        _pso_dec_signal_2.Dispose();
-        _pso_sharpen.Dispose();
-
-        _screenTarget0.Dispose();
-        _screenTarget1.Dispose();
         _depthTarget.Dispose();
         _blankTexture.Dispose();
         
-        _cb_lut.Dispose();
-        _signal_tex_1.Dispose();
-        _signal_tex_2.Dispose();
-        
-        _shadowmask.Dispose();
-
-        _blit_vertex.Dispose();
-        _blit_fragment.Dispose();
-        _blit_tv.Dispose();
-        _blit_interlace_fragment.Dispose();
         _vu_vertex.Dispose();
         _ff_fragment.Dispose();
-        _gen_phase.Dispose();
-        _gen_signal.Dispose();
-        _dec_signal_1.Dispose();
-        _dec_signal_2.Dispose();
-        _sharpen.Dispose();
     }
 
     private static uint EncodeVUInstr(ushort opcode, ushort d, ushort s, ushort sx = 0, ushort sy = 0, ushort sz = 0, ushort sw = 0, ushort m = 0)

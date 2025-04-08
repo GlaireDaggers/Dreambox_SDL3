@@ -4,3 +4,5 @@ src/publish
 src/imgui.ini
 *.nettrace
 *.speedscope.json
+*.user
+**/.idea

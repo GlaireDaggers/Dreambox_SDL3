@@ -378,6 +378,48 @@ class Texture : GraphicsResource
         }, cycleTexture);
     }
 
+    /// <summary>
+    /// Begin downloading a portion of this buffer from the GPU.
+    /// </summary>
+    /// <param name="copyPass">A copy pass that the download will happen within</param>
+    public void GetData(nint copyPass, int mipLevel, int layer, int x, int y, int z, int w, int h, int d)
+    {
+        SDL.SDL_DownloadFromGPUTexture(copyPass, new SDL.SDL_GPUTextureRegion() {
+            texture = handle,
+            mip_level = (uint)mipLevel,
+            layer = (uint)layer,
+            x = (uint)x,
+            y = (uint)y,
+            z = (uint)z,
+            w = (uint)w,
+            h = (uint)h,
+            d = (uint)d,
+        }, new SDL.SDL_GPUTextureTransferInfo() {
+            transfer_buffer = _transferBuffer,
+            offset = 0,
+            pixels_per_row = 0,
+            rows_per_layer = 0
+        });
+    }
+
+    /// <summary>
+    /// Read data previously downloaded from the GPU via GetData. Note that GetData is not guaranteed to complete until the command buffer it was recorded to has signalled its fence.
+    /// </summary>
+    /// <param name="outData">Output span to read data into</param>
+    public void ReadData<TData>(Span<TData> outData)
+        where TData : unmanaged
+    {
+        unsafe
+        {
+            var transferPtr = (void*)SDL.SDL_MapGPUTransferBuffer(device.handle, _transferBuffer, true);
+            fixed (void* dst = outData)
+            {
+                Unsafe.CopyBlock(dst, transferPtr, (uint)(Unsafe.SizeOf<TData>() * outData.Length));
+            }
+            SDL.SDL_UnmapGPUTransferBuffer(device.handle, _transferBuffer);
+        }
+    }
+
     public override void Dispose()
     {
         SDL.SDL_ReleaseGPUTransferBuffer(device.handle, _transferBuffer);

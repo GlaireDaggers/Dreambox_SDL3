@@ -31,6 +31,9 @@
 
     <!-- Use to enable "standalone" mode for games (disables built-in menu, & automatically loads a "game.iso" stored in the content folder) -->
     <!-- <DefineConstants>$(DefineConstants);ENABLE_STANDALONE_MODE</DefineConstants> -->
+
+    <!-- Use to enable running as separate host/child processes instead of as a single process -->
+    <!-- <DefineConstants>$(DefineConstants);ENABLE_SEPARATE_PROCESS</DefineConstants> -->
   </PropertyGroup>
 
 </Project>
