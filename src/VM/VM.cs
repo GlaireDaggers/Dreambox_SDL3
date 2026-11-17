@@ -615,7 +615,7 @@ class Runtime : IDisposable
                 }
                 else if (mode == 1)
                 {
-                    stream = _mcb.fs.OpenWrite(path[4..]);
+                    stream = _mca.fs.OpenWrite(path[4..]);
                 }
                 else
                 {
@@ -640,7 +640,7 @@ class Runtime : IDisposable
             {
                 if (mode == 0)
                 {
-                    stream = _mca.fs.OpenRead(path[4..]);
+                    stream = _mcb.fs.OpenRead(path[4..]);
                 }
                 else if (mode == 1)
                 {
