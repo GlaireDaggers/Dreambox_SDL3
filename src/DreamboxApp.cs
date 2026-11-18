@@ -469,7 +469,8 @@ class DreamboxApp
             return null;
         }
 
-        throw new NotImplementedException();
+        Console.WriteLine("No CD Driver found for this platform.");
+        return null;
     }
 
     private unsafe void DrawUI(ref bool quit)
