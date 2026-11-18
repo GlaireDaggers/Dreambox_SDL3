@@ -160,7 +160,16 @@ class DreamboxApp
 
         if (_config.DefaultDiscDriver == DreamboxDiscDriver.CD)
         {
-            _disk.SetDriver(CreateCDDriver());
+            var cdDriver = CreateCDDriver();
+            if (cdDriver != null)
+            {
+                _disk.SetDriver(cdDriver);
+            }
+            else
+            {
+                Console.WriteLine("Invalid CD driver (falling back to ISO driver)");
+                _disk.SetDriver(new ISODiskDriver());
+            }
         }
         else if (_config.DefaultDiscDriver == DreamboxDiscDriver.ISO)
         {
@@ -442,18 +451,26 @@ class DreamboxApp
     #endif
     }
 
-    private IDiskDriver CreateCDDriver()
+    private IDiskDriver? CreateCDDriver()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        try
         {
-            return new WindowsCDDiskDriver();
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return new WindowsCDDiskDriver();
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                return new LinuxCDDiskDriver();
+            }
         }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        catch(DriveNotFoundException)
         {
-            return new LinuxCDDiskDriver();
+            return null;
         }
 
-        throw new NotImplementedException();
+        Console.WriteLine("No CD Driver found for this platform.");
+        return null;
     }
 
     private unsafe void DrawUI(ref bool quit)
